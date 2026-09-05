@@ -1,0 +1,14 @@
+# Zig build artifacts
+.zig-cache
+zig-out
+
+# Common editor / IDE files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,245 @@
+const std = @import("std");
+const posix = std.posix;
+const linux = std.os.linux;
+
+fn closeFd(fd: posix.fd_t) void {
+    _ = linux.close(fd);
+}
+
+const c = @cImport({
+    @cInclude("linux/input-event-codes.h");
+    @cInclude("linux/input.h");
+    @cInclude("linux/uinput.h");
+    @cInclude("sys/ioctl.h");
+});
+
+// Re-export the kernel structs so existing consumers keep working.
+pub const InputId = c.struct_input_id;
+pub const UinputSetup = c.struct_uinput_setup;
+
+// Device IDs (ours, not from headers).
+const vendor_id = 0x1234;
+const product_id = 0x5678;
+
+pub const device_name = "zhisper";
+pub const expected_key_count: usize = 58;
+
+var fd_uinput: posix.fd_t = -1;
+
+pub fn buildUinputSetup() UinputSetup {
+    var setup: UinputSetup = std.mem.zeroes(UinputSetup);
+    setup.id.bustype = c.BUS_USB;
+    setup.id.vendor = vendor_id;
+    setup.id.product = product_id;
+    @memcpy(setup.name[0..device_name.len], device_name);
+    return setup;
+}
+
+pub fn allKeyCodes() [expected_key_count]u16 {
+    var codes: [expected_key_count]u16 = undefined;
+    var i: usize = 0;
+    for (c.KEY_Q..c.KEY_P + 1) |code| {
+        codes[i] = @intCast(code);
+        i += 1;
+    }
+    for (c.KEY_A..c.KEY_L + 1) |code| {
+        codes[i] = @intCast(code);
+        i += 1;
+    }
+    for (c.KEY_Z..c.KEY_M + 1) |code| {
+        codes[i] = @intCast(code);
+        i += 1;
+    }
+    for (c.KEY_1..c.KEY_0 + 1) |code| {
+        codes[i] = @intCast(code);
+        i += 1;
+    }
+    inline for (.{ c.KEY_SPACE, c.KEY_MINUS, c.KEY_EQUAL, c.KEY_LEFTBRACE, c.KEY_RIGHTBRACE, c.KEY_SEMICOLON, c.KEY_APOSTROPHE, c.KEY_GRAVE, c.KEY_BACKSLASH, c.KEY_COMMA, c.KEY_DOT, c.KEY_SLASH, c.KEY_TAB, c.KEY_ENTER, c.KEY_BACKSPACE }) |code| {
+        codes[i] = @intCast(code);
+        i += 1;
+    }
+    inline for (.{ c.KEY_LEFTCTRL, c.KEY_RIGHTCTRL, c.KEY_LEFTALT, c.KEY_RIGHTALT, c.KEY_LEFTSHIFT, c.KEY_RIGHTSHIFT, c.KEY_LEFTMETA }) |code| {
+        codes[i] = @intCast(code);
+        i += 1;
+    }
+    std.debug.assert(i == expected_key_count);
+    return codes;
+}
+
+pub fn destroyUinput() void {
+    if (fd_uinput < 0) return;
+    ioctlNoArg(fd_uinput, c.UI_DEV_DESTROY) catch {};
+    closeFd(fd_uinput);
+    fd_uinput = -1;
+}
+
+pub fn setupUinput(io: std.Io) !void {
+    fd_uinput = try posix.openat(posix.AT.FDCWD, "/dev/uinput", .{
+        .ACCMODE = .WRONLY,
+        .NONBLOCK = true,
+    }, 0);
+    errdefer {
+        closeFd(fd_uinput);
+        fd_uinput = -1;
+    }
+
+    try ioctlInt(fd_uinput, c.UI_SET_EVBIT, c.EV_KEY);
+
+    const codes = allKeyCodes();
+    for (codes) |code| try setKeyBit(code);
+
+    var setup = buildUinputSetup();
+
+    try ioctlPtr(fd_uinput, c.UI_DEV_SETUP, &setup);
+    try ioctlNoArg(fd_uinput, c.UI_DEV_CREATE);
+
+    // Give libinput/udev a moment to pick up the new device.
+    try io.sleep(.fromMilliseconds(100), .awake);
+}
+
+fn setKeyBit(code: usize) !void {
+    return ioctlInt(fd_uinput, c.UI_SET_KEYBIT, @intCast(code));
+}
+
+fn ioctlError() !void {
+    const err: posix.E = @enumFromInt(std.c._errno().*);
+    return switch (err) {
+        .BADF => error.BadFileDescriptor,
+        else => posix.unexpectedErrno(err),
+    };
+}
+
+fn ioctlInt(fd: posix.fd_t, request: c_ulong, arg: c_int) !void {
+    if (c.ioctl(fd, request, arg) == -1) return ioctlError();
+}
+
+fn ioctlPtr(fd: posix.fd_t, request: c_ulong, ptr: *UinputSetup) !void {
+    if (c.ioctl(fd, request, ptr) == -1) return ioctlError();
+}
+
+fn ioctlNoArg(fd: posix.fd_t, request: c_ulong) !void {
+    if (c.ioctl(fd, request) == -1) return ioctlError();
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}
+
+test "UinputSetup layout matches kernel" {
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(InputId));
+    try std.testing.expectEqual(@as(usize, 92), @sizeOf(UinputSetup));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(UinputSetup, "id"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(UinputSetup, "name"));
+    try std.testing.expectEqual(@as(usize, 88), @offsetOf(UinputSetup, "ff_effects_max"));
+    const zero: UinputSetup = std.mem.zeroes(UinputSetup);
+    try std.testing.expectEqual(@as(u16, 0), zero.id.bustype);
+    try std.testing.expectEqual(@as(u8, 0), zero.name[0]);
+}
+
+test "kernel constants sanity" {
+    try std.testing.expectEqual(@as(c_int, 1), c.EV_KEY);
+    try std.testing.expectEqual(@as(c_int, 3), c.BUS_USB);
+    try std.testing.expectEqual(@as(c_int, 16), c.KEY_Q);
+    try std.testing.expectEqual(@as(c_int, 25), c.KEY_P);
+    try std.testing.expectEqual(@as(c_int, 30), c.KEY_A);
+    try std.testing.expectEqual(@as(c_int, 38), c.KEY_L);
+    try std.testing.expectEqual(@as(c_int, 44), c.KEY_Z);
+    try std.testing.expectEqual(@as(c_int, 50), c.KEY_M);
+    try std.testing.expectEqual(@as(c_int, 2), c.KEY_1);
+    try std.testing.expectEqual(@as(c_int, 11), c.KEY_0);
+    // Values come from _IOW('U',...) encoding; guard against header drift.
+    try std.testing.expectEqual(@as(c_ulong, 0x40045564), c.UI_SET_EVBIT);
+    try std.testing.expectEqual(@as(c_ulong, 0x40045565), c.UI_SET_KEYBIT);
+    try std.testing.expectEqual(@as(c_ulong, 0x405C5503), c.UI_DEV_SETUP);
+    try std.testing.expectEqual(@as(c_ulong, 0x5501), c.UI_DEV_CREATE);
+}
+
+test "buildUinputSetup id and name" {
+    const setup = buildUinputSetup();
+    try std.testing.expectEqual(@as(u16, c.BUS_USB), setup.id.bustype);
+    try std.testing.expectEqual(@as(u16, vendor_id), setup.id.vendor);
+    try std.testing.expectEqual(@as(u16, product_id), setup.id.product);
+    try std.testing.expectEqual(@as(u16, 0), setup.id.version);
+    try std.testing.expectEqual(@as(u32, 0), setup.ff_effects_max);
+    try std.testing.expect(device_name.len < setup.name.len);
+    try std.testing.expectEqualStrings(device_name, setup.name[0..device_name.len]);
+    // NUL-terminated and zero-padded.
+    try std.testing.expectEqual(@as(u8, 0), setup.name[device_name.len]);
+    for (setup.name[device_name.len..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+}
+
+test "allKeyCodes count, coverage, no duplicates" {
+    const codes = allKeyCodes();
+    try std.testing.expectEqual(expected_key_count, codes.len);
+
+    // Spot-check representatives from each group.
+    const wants = [_]u16{
+        @intCast(c.KEY_Q),  @intCast(c.KEY_P),
+        @intCast(c.KEY_A),  @intCast(c.KEY_L),
+        @intCast(c.KEY_Z),  @intCast(c.KEY_M),
+        @intCast(c.KEY_1),  @intCast(c.KEY_0),
+        @intCast(c.KEY_SPACE),     @intCast(c.KEY_ENTER),
+        @intCast(c.KEY_BACKSPACE), @intCast(c.KEY_TAB),
+        @intCast(c.KEY_LEFTCTRL),  @intCast(c.KEY_RIGHTCTRL),
+        @intCast(c.KEY_LEFTALT),   @intCast(c.KEY_RIGHTALT),
+        @intCast(c.KEY_LEFTSHIFT), @intCast(c.KEY_RIGHTSHIFT),
+        @intCast(c.KEY_LEFTMETA),
+    };
+    for (wants) |w| {
+        var found = false;
+        for (codes) |have| if (have == w) {
+            found = true;
+            break;
+        };
+        try std.testing.expect(found);
+    }
+
+    // No duplicates.
+    for (codes, 0..) |a, idx| {
+        for (codes[idx + 1 ..]) |b| try std.testing.expect(a != b);
+    }
+
+    // Letter/number ranges are fully covered.
+    var q_count: usize = 0;
+    var a_count: usize = 0;
+    var z_count: usize = 0;
+    var n_count: usize = 0;
+    for (codes) |code| {
+        if (code >= c.KEY_Q and code <= c.KEY_P) q_count += 1;
+        if (code >= c.KEY_A and code <= c.KEY_L) a_count += 1;
+        if (code >= c.KEY_Z and code <= c.KEY_M) z_count += 1;
+        if (code >= c.KEY_1 and code <= c.KEY_0) n_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10), q_count);
+    try std.testing.expectEqual(@as(usize, 9), a_count);
+    try std.testing.expectEqual(@as(usize, 7), z_count);
+    try std.testing.expectEqual(@as(usize, 10), n_count);
+}
+
+test "ioctl helpers reject bad fd" {
+    try std.testing.expectError(error.BadFileDescriptor, ioctlInt(-1, c.UI_DEV_CREATE, 0));
+    try std.testing.expectError(error.BadFileDescriptor, ioctlNoArg(-1, c.UI_DEV_CREATE));
+    var dummy: UinputSetup = std.mem.zeroes(UinputSetup);
+    try std.testing.expectError(error.BadFileDescriptor, ioctlPtr(-1, c.UI_DEV_SETUP, &dummy));
+}
+
+test "destroyUinput is safe when idle" {
+    if (fd_uinput >= 0) destroyUinput();
+    try std.testing.expectEqual(@as(posix.fd_t, -1), fd_uinput);
+    destroyUinput();
+    try std.testing.expectEqual(@as(posix.fd_t, -1), fd_uinput);
+}
+
+test "setupUinput creates device" {
+    // Needs /dev/uinput + permission (input group or root). Skip in CI.
+    const probe = posix.openat(posix.AT.FDCWD, "/dev/uinput", .{ .ACCMODE = .WRONLY }, 0) catch
+        return error.SkipZigTest;
+    closeFd(probe);
+
+    if (fd_uinput >= 0) destroyUinput();
+    defer destroyUinput();
+
+    const io = std.testing.io;
+    try setupUinput(io);
+    try std.testing.expect(fd_uinput >= 0);
+}
