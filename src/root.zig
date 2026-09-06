@@ -5,8 +5,10 @@ const std = @import("std");
 // backends are namespaced: `root.audio.setRecording`, `root.linux.setupUinput`.)
 pub const linux = @import("linux.zig");
 pub const audio = @import("audio.zig");
+pub const transcribe = @import("transcribe.zig");
 
 test {
     std.testing.refAllDecls(linux);
     std.testing.refAllDecls(audio);
+    std.testing.refAllDecls(transcribe);
 }
