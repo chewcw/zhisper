@@ -128,3 +128,25 @@ test "transcribeWithKey against discard port fails without network" {
     // Any transport-level error is fine; what matters is it does NOT succeed and does NOT touch Groq.
     try std.testing.expect(err != error.MissingText);
 }
+
+test "live Groq transcribe (opt-in)" {
+    if (std.c.getenv("TRANSCRIBE_LIVE") == null) return error.SkipZigTest;
+    if (std.c.getenv("GROQ_API_KEY") == null) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    // Tiny silence WAV (16 samples) — proves auth + multipart + parse end-to-end.
+    const silence = [_]i16{0} ** 16;
+    const wav_mod = @import("wav.zig");
+    var hdr: [44]u8 = undefined;
+    wav_mod.header(silence.len, &hdr);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try aw.writer.writeAll(&hdr);
+    try aw.writer.writeAll(std.mem.sliceAsBytes(&silence));
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "live-transcribe.wav", .data = aw.writer.buffered() });
+    defer std.Io.Dir.cwd().deleteFile(io, "live-transcribe.wav") catch {};
+    const got = try transcribe(io, gpa, "live-transcribe.wav", .{});
+    defer gpa.free(got);
+    // Silence may transcribe to empty; what matters is it is trimmed (no leading space).
+    try std.testing.expect(got.len == 0 or got[0] != ' ');
+}
