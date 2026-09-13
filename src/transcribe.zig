@@ -86,20 +86,18 @@ fn apiKey() ?[]const u8 {
     return std.mem.span(raw);
 }
 
-pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, opts: Options) ![]u8 {
-    const key = apiKey() orelse return error.MissingApiKey;
-    return try transcribeWithKey(io, gpa, wav_path, opts, key);
-}
-
-pub fn transcribeWithKey(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, opts: Options, api_key: []const u8) ![]u8 {
+/// Canonical HTTP path: OpenAI-compatible multipart POST, Bearer auth,
+/// {"text": ...} response. Non-200 maps to error.UpstreamRejected (status code
+/// is the caller's to log; never log key or body here).
+pub fn transcribeWithConfig(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, cfg: Config) ![]u8 {
     const wav = try std.Io.Dir.cwd().readFileAlloc(io, wav_path, gpa, .limited(wav_cap));
     defer gpa.free(wav);
 
     const boundary = "----zhisperBoundary7MA4YWxkTrZu0gW";
-    const body = try buildMultipart(gpa, boundary, wav, "audio.wav", opts.model, opts.prompt);
+    const body = try buildMultipart(gpa, boundary, wav, "audio.wav", cfg.model, cfg.prompt);
     defer gpa.free(body);
 
-    const auth = try std.fmt.allocPrint(gpa, "Bearer {s}", .{api_key});
+    const auth = try std.fmt.allocPrint(gpa, "Bearer {s}", .{cfg.api_key});
     defer gpa.free(auth);
     // Zero the key material before freeing (declared after the free, so it runs first).
     defer @memset(auth, 0);
@@ -114,7 +112,7 @@ pub fn transcribeWithKey(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u
     defer resp.deinit();
 
     const res = client.fetch(.{
-        .location = .{ .url = opts.base_url },
+        .location = .{ .url = cfg.base_url },
         .method = .POST,
         .headers = .{
             .authorization = .{ .override = auth },
@@ -123,11 +121,22 @@ pub fn transcribeWithKey(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u
         .payload = body,
         .response_writer = &resp.writer,
     }) catch return error.HttpError;
-    if (res.status != .ok) return error.GroqRejected;
+    if (res.status != .ok) return error.UpstreamRejected;
 
     const json_body = resp.writer.buffered();
     if (json_body.len > response_cap) return error.ResponseTooLarge;
     return try parseText(gpa, json_body);
+}
+
+// Compat: pre-provider surface. Delegates to transcribeWithConfig so behavior
+// (multipart shape, trim, caps, zeroing) stays single-sourced.
+pub fn transcribe(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, opts: Options) ![]u8 {
+    const key = apiKey() orelse return error.MissingApiKey;
+    return try transcribeWithKey(io, gpa, wav_path, opts, key);
+}
+
+pub fn transcribeWithKey(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, opts: Options, api_key: []const u8) ![]u8 {
+    return try transcribeWithConfig(io, gpa, wav_path, .{ .base_url = opts.base_url, .model = opts.model, .api_key = api_key, .prompt = opts.prompt });
 }
 
 test "multipart contains file, model, prompt parts" {
@@ -227,4 +236,14 @@ test "resolveConfig uses preset unless overridden, rejects missing key" {
     try std.testing.expectEqualStrings("http://localhost:8080/x", over.base_url);
     try std.testing.expectError(error.MissingApiKey, resolveConfig(groq, null, null, null));
     try std.testing.expectError(error.MissingApiKey, resolveConfig(groq, "", null, null));
+}
+
+test "transcribeWithConfig against discard port fails without network" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "task2c-tiny.wav", .data = "RIFF" });
+    defer std.Io.Dir.cwd().deleteFile(io, "task2c-tiny.wav") catch {};
+    const cfg: Config = .{ .base_url = "http://127.0.0.1:9/audio/transcriptions", .model = "m", .api_key = "dummy-key" };
+    const err = transcribeWithConfig(io, gpa, "task2c-tiny.wav", cfg) catch |e| e;
+    try std.testing.expect(err != error.MissingText);
 }
