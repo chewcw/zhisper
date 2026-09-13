@@ -52,14 +52,10 @@ pub const CliOverrides = struct {
 };
 
 pub fn parseFileConfig(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
-    // api_key must never appear in the file: scan raw bytes FIRST so the
-    // error is always ApiKeyInFile (the unknown-key check below would
-    // otherwise report UnknownField for the same line).
-    const raw = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 * 1024));
-    defer gpa.free(raw);
-    if (std.mem.indexOf(u8, raw, "api_key") != null) return error.ApiKeyInFile;
     // The vendored 0.16 toml parser silently drops unknown keys, so the
-    // typo-catching strict mode is an allowlist over a Table parse.
+    // typo-catching strict mode is an allowlist over a Table parse. A key
+    // named api_key is rejected as ApiKeyInFile (not UnknownField) so the
+    // message tells the user keys belong in env, never in the file.
     try checkUnknownFields(gpa, io, path);
     var parser = toml.Parser(Config).init(gpa);
     defer parser.deinit();
@@ -171,6 +167,66 @@ pub fn validate(cfg: Config) !void {
     if (cfg.daemon.min_duration_ms == 0) return error.InvalidDuration;
 }
 
+fn envStr(name: [*:0]const u8) ?[]const u8 {
+    const raw = std.c.getenv(name) orelse return null;
+    if (raw[0] == 0) return null;
+    return std.mem.span(raw);
+}
+
+fn envU16(name: [*:0]const u8) ?u16 {
+    const s = envStr(name) orelse return null;
+    return std.fmt.parseInt(u16, s, 10) catch null;
+}
+
+fn envU32(name: [*:0]const u8) ?u32 {
+    const s = envStr(name) orelse return null;
+    return std.fmt.parseInt(u32, s, 10) catch null;
+}
+
+fn envBool(name: [*:0]const u8) ?bool {
+    const s = envStr(name) orelse return null;
+    if (std.mem.eql(u8, s, "1") or std.mem.eql(u8, s, "true")) return true;
+    if (std.mem.eql(u8, s, "0") or std.mem.eql(u8, s, "false")) return false;
+    return null;
+}
+
+pub fn readEnvValues() EnvValues {
+    return .{
+        .provider = envStr("ZHISPER_PROVIDER"),
+        .model = envStr("ZHISPER_MODEL"),
+        .base_url = envStr("ZHISPER_BASE_URL"),
+        .prompt = envStr("ZHISPER_PROMPT"),
+        .key_code = envU16("ZHISPER_KEY_CODE"),
+        .mode = envStr("ZHISPER_MODE"),
+        .evdev = envStr("ZHISPER_EVDEV"),
+        .device = envStr("ZHISPER_DEVICE"),
+        .min_duration_ms = envU32("ZHISPER_MIN_DURATION_MS"),
+        .wav_path = envStr("ZHISPER_WAV_PATH"),
+        .keep_wav_on_error = envBool("ZHISPER_KEEP_WAV"),
+        .verbose = envBool("ZHISPER_VERBOSE"),
+    };
+}
+
+pub fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8, cli: CliOverrides) !Config {
+    var cfg = defaultConfig();
+    const from_file = parseFileConfig(gpa, io, path) catch |e| switch (e) {
+        error.FileNotFound, error.NoDevice, error.NotDir => null,
+        else => return e,
+    };
+    if (from_file) |fc| cfg = fc;
+    cfg = applyEnv(cfg, readEnvValues());
+    cfg = applyCli(cfg, cli);
+    validate(cfg) catch |e| {
+        if (from_file != null) freeConfig(gpa, from_file.?);
+        return e;
+    };
+    // The merged cfg borrows from the file parse (owned), env/argv
+    // (borrowed), or literals — copy it whole so the result is always owned.
+    const owned = try dupeConfig(gpa, cfg);
+    if (from_file != null) freeConfig(gpa, from_file.?);
+    return owned;
+}
+
 // Every TOML key the file is allowed to contain. checkUnknownFields is the
 // single owner of this list; the struct definitions above own the values.
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
@@ -192,7 +248,10 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
             keys = s.keys;
             break;
         };
-        const want = keys orelse return error.UnknownField;
+        const want = keys orelse {
+            if (std.mem.eql(u8, "api_key", sec.key_ptr.*)) return error.ApiKeyInFile;
+            return error.UnknownField;
+        };
         const sub = switch (sec.value_ptr.*) {
             // A non-table section (e.g. `provider = "x"` at top level)
             // surfaces as InvalidValueType from the Config parse below.
@@ -206,7 +265,9 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
                 ok = true;
                 break;
             };
-            if (!ok) return error.UnknownField;
+            if (ok) continue;
+            if (std.mem.eql(u8, "api_key", entry.key_ptr.*)) return error.ApiKeyInFile;
+            return error.UnknownField;
         }
     }
 }
@@ -280,4 +341,21 @@ test "validate rejects custom without url and bad mode" {
     cfg.transcribe.model = "m";
     cfg.hotkey.mode = "bogus";
     try std.testing.expectError(error.InvalidMode, validate(cfg));
+}
+
+test "example file parses clean" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const cfg = try parseFileConfig(gpa, io, "config.example.toml");
+    defer freeConfig(gpa, cfg);
+    try validate(cfg);
+    try std.testing.expectEqualStrings("groq", cfg.transcribe.provider);
+}
+
+test "load with missing file yields defaults plus CLI" {
+    const gpa = std.testing.allocator;
+    const cfg = try load(gpa, std.testing.io, "/tmp/zhisper-missing-config.toml", .{ .key_code = 70 });
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectEqual(@as(u16, 70), cfg.hotkey.key_code);
+    try std.testing.expectEqualStrings("groq", cfg.transcribe.provider);
 }
