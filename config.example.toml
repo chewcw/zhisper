@@ -1,0 +1,25 @@
+# zhisper example config — copy to OS config dir and edit.
+# Linux: ~/.config/zhisper/config.toml
+# Windows: %APPDATA%/zhisper/config.toml
+# macOS: ~/Library/Application Support/zhisper/config.toml
+# Secrets are NEVER set here (api_key in this file is a hard error); use env vars.
+
+[transcribe]
+provider = "groq" # groq | openai | custom
+model = ""        # empty = preset default
+base_url = ""     # empty = preset default; required if provider=custom
+prompt = ""
+
+[hotkey]
+key_code = 67     # OS-native (Linux KEY_F9=67)
+mode = "hold"     # hold | toggle
+evdev = ""        # Linux only, empty = auto-scan
+
+[audio]
+device = ""       # empty = system default mic
+
+[daemon]
+min_duration_ms = 500
+wav_path = "/tmp/zhisper.wav"
+keep_wav_on_error = true
+verbose = false
