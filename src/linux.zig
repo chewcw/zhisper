@@ -28,12 +28,12 @@ pub const expected_key_count: usize = 58;
 var fd_uinput: posix.fd_t = -1;
 
 pub fn buildUinputSetup() UinputSetup {
-    var setup: UinputSetup = std.mem.zeroes(UinputSetup);
-    setup.id.bustype = c.BUS_USB;
-    setup.id.vendor = vendor_id;
-    setup.id.product = product_id;
-    @memcpy(setup.name[0..device_name.len], device_name);
-    return setup;
+    var uisetup: UinputSetup = std.mem.zeroes(UinputSetup);
+    uisetup.id.bustype = c.BUS_USB;
+    uisetup.id.vendor = vendor_id;
+    uisetup.id.product = product_id;
+    @memcpy(uisetup.name[0..device_name.len], device_name);
+    return uisetup;
 }
 
 pub fn allKeyCodes() [expected_key_count]u16 {
@@ -67,14 +67,14 @@ pub fn allKeyCodes() [expected_key_count]u16 {
     return codes;
 }
 
-pub fn destroyUinput() void {
+pub fn destroy() void {
     if (fd_uinput < 0) return;
     ioctlNoArg(fd_uinput, c.UI_DEV_DESTROY) catch {};
     closeFd(fd_uinput);
     fd_uinput = -1;
 }
 
-pub fn setupUinput(io: std.Io) !void {
+pub fn setup(io: std.Io) !void {
     fd_uinput = try posix.openat(posix.AT.FDCWD, "/dev/uinput", .{
         .ACCMODE = .WRONLY,
         .NONBLOCK = true,
@@ -89,9 +89,9 @@ pub fn setupUinput(io: std.Io) !void {
     const codes = allKeyCodes();
     for (codes) |code| try setKeyBit(code);
 
-    var setup = buildUinputSetup();
+    var uisetup = buildUinputSetup();
 
-    try ioctlPtr(fd_uinput, c.UI_DEV_SETUP, &setup);
+    try ioctlPtr(fd_uinput, c.UI_DEV_SETUP, &uisetup);
     try ioctlNoArg(fd_uinput, c.UI_DEV_CREATE);
 
     // Give libinput/udev a moment to pick up the new device.
@@ -124,7 +124,7 @@ fn ioctlNoArg(fd: posix.fd_t, request: c_ulong) !void {
 
 /// Writes one key event plus the closing SYN report to the uinput device.
 /// Protocol (key press, report, key release, report) and the ioctls used in
-/// setupUinput (UI_SET_EVBIT / UI_SET_KEYBIT / UI_DEV_SETUP / UI_DEV_CREATE)
+/// setup (UI_SET_EVBIT / UI_SET_KEYBIT / UI_DEV_SETUP / UI_DEV_CREATE)
 /// follow the kernel uinput docs:
 /// https://www.kernel.org/doc/html/latest/input/uinput.html
 /// Timestamps are left zeroed — the kernel ignores them for uinput writes.
@@ -281,17 +281,17 @@ test "kernel constants sanity" {
 }
 
 test "buildUinputSetup id and name" {
-    const setup = buildUinputSetup();
-    try std.testing.expectEqual(@as(u16, c.BUS_USB), setup.id.bustype);
-    try std.testing.expectEqual(@as(u16, vendor_id), setup.id.vendor);
-    try std.testing.expectEqual(@as(u16, product_id), setup.id.product);
-    try std.testing.expectEqual(@as(u16, 0), setup.id.version);
-    try std.testing.expectEqual(@as(u32, 0), setup.ff_effects_max);
-    try std.testing.expect(device_name.len < setup.name.len);
-    try std.testing.expectEqualStrings(device_name, setup.name[0..device_name.len]);
+    const uisetup = buildUinputSetup();
+    try std.testing.expectEqual(@as(u16, c.BUS_USB), uisetup.id.bustype);
+    try std.testing.expectEqual(@as(u16, vendor_id), uisetup.id.vendor);
+    try std.testing.expectEqual(@as(u16, product_id), uisetup.id.product);
+    try std.testing.expectEqual(@as(u16, 0), uisetup.id.version);
+    try std.testing.expectEqual(@as(u32, 0), uisetup.ff_effects_max);
+    try std.testing.expect(device_name.len < uisetup.name.len);
+    try std.testing.expectEqualStrings(device_name, uisetup.name[0..device_name.len]);
     // NUL-terminated and zero-padded.
-    try std.testing.expectEqual(@as(u8, 0), setup.name[device_name.len]);
-    for (setup.name[device_name.len..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
+    try std.testing.expectEqual(@as(u8, 0), uisetup.name[device_name.len]);
+    for (uisetup.name[device_name.len..]) |b| try std.testing.expectEqual(@as(u8, 0), b);
 }
 
 test "allKeyCodes count, coverage, no duplicates" {
@@ -349,24 +349,24 @@ test "ioctl helpers reject bad fd" {
     try std.testing.expectError(error.BadFileDescriptor, ioctlPtr(-1, c.UI_DEV_SETUP, &dummy));
 }
 
-test "destroyUinput is safe when idle" {
-    if (fd_uinput >= 0) destroyUinput();
+test "destroy is safe when idle" {
+    if (fd_uinput >= 0) destroy();
     try std.testing.expectEqual(@as(posix.fd_t, -1), fd_uinput);
-    destroyUinput();
+    destroy();
     try std.testing.expectEqual(@as(posix.fd_t, -1), fd_uinput);
 }
 
-test "setupUinput creates device" {
+test "setup creates device" {
     // Needs /dev/uinput + permission (input group or root). Skip in CI.
     const probe = posix.openat(posix.AT.FDCWD, "/dev/uinput", .{ .ACCMODE = .WRONLY }, 0) catch
         return error.SkipZigTest;
     closeFd(probe);
 
-    if (fd_uinput >= 0) destroyUinput();
-    defer destroyUinput();
+    if (fd_uinput >= 0) destroy();
+    defer destroy();
 
     const io = std.testing.io;
-    try setupUinput(io);
+    try setup(io);
     try std.testing.expect(fd_uinput >= 0);
 }
 

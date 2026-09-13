@@ -11,11 +11,7 @@ else switch (builtin.os.tag) {
 };
 
 pub fn setup(io: std.Io) !void {
-    if (builtin.is_test) return impl.setup(io);
-    switch (builtin.os.tag) {
-        .linux => return @import("linux.zig").setupUinput(io),
-        else => return impl.setup(io),
-    }
+    return impl.setup(io);
 }
 
 pub fn typeText(text: []const u8) !usize {
@@ -23,14 +19,7 @@ pub fn typeText(text: []const u8) !usize {
 }
 
 pub fn destroy() void {
-    if (builtin.is_test) {
-        impl.destroy();
-        return;
-    }
-    switch (builtin.os.tag) {
-        .linux => @import("linux.zig").destroyUinput(),
-        else => impl.destroy(),
-    }
+    impl.destroy();
 }
 
 test "facade types through the stub" {
