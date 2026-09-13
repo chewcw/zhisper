@@ -1,6 +1,8 @@
 # Zig build artifacts
 .zig-cache
 zig-out
+# Local package cache (re-fetched from build.zig.zon hashes)
+zig-pkg
 
 # Common editor / IDE files
 .idea
