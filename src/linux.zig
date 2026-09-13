@@ -149,6 +149,11 @@ pub fn emitKey(code: u16, action: KeyEvent) !void {
     if (written_syn != ev_syn_bytes.len) return error.ShortWrite;
 }
 
+pub fn tapKey(code: u16) !void {
+    try emitKey(code, .pressed);
+    try emitKey(code, .released);
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
@@ -278,4 +283,11 @@ test "emitKey without setup returns NotSetup" {
     defer fd_uinput = saved;
     try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .pressed));
     try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .released));
+}
+
+test "tapKey without setup returns NotSetup" {
+    const saved = fd_uinput;
+    fd_uinput = -1;
+    defer fd_uinput = saved;
+    try std.testing.expectError(error.NotSetup, tapKey(c.KEY_A));
 }
