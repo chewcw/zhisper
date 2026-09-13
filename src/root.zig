@@ -8,8 +8,7 @@ pub const audio = @import("audio.zig");
 pub const transcribe = @import("transcribe.zig");
 pub const hotkey = @import("hotkey.zig");
 pub const hotkey_types = @import("hotkey_types.zig");
-// Task 7 enables these:
-// pub const inject = @import("inject.zig");
+pub const inject = @import("inject.zig");
 // Linux-only headers must never be analyzed on other targets.
 pub const linux = if (builtin.os.tag == .linux) @import("linux.zig") else struct {};
 
@@ -19,9 +18,8 @@ test {
     std.testing.refAllDecls(@import("hotkey.zig"));
     std.testing.refAllDecls(@import("hotkey_types.zig"));
     std.testing.refAllDecls(@import("hotkey_stub.zig"));
-    // Task 7 enables these:
-    // std.testing.refAllDecls(@import("inject.zig"));
-    // std.testing.refAllDecls(@import("inject_stub.zig"));
+    std.testing.refAllDecls(@import("inject.zig"));
+    std.testing.refAllDecls(@import("inject_stub.zig"));
     std.testing.refAllDecls(@import("hotkey_windows.zig"));
     std.testing.refAllDecls(@import("hotkey_macos.zig"));
     std.testing.refAllDecls(@import("inject_windows.zig"));
