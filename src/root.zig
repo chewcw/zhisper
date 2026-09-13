@@ -11,4 +11,5 @@ test {
     std.testing.refAllDecls(linux);
     std.testing.refAllDecls(audio);
     std.testing.refAllDecls(transcribe);
+    std.testing.refAllDecls(@import("hotkey_types.zig"));
 }

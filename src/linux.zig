@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const KeyEvent = @import("hotkey_types.zig").KeyEvent;
 
 fn closeFd(fd: posix.fd_t) void {
     _ = linux.close(fd);
@@ -121,8 +122,8 @@ fn ioctlNoArg(fd: posix.fd_t, request: c_ulong) !void {
     if (c.ioctl(fd, request) == -1) return ioctlError();
 }
 
-pub fn emitKey(fd: posix.fd_t, code: u16, pressed: bool) !void {
-    const value: u32 = if (pressed) 1 else 0;
+pub fn emitKey(fd: posix.fd_t, code: u16, action: KeyEvent) !void {
+    const value: u32 = if (action == .pressed) 1 else 0;
     const ev_key = c.struct_input_event{
         .type = c.EV_KEY,
         .code = @intCast(code),
@@ -267,5 +268,5 @@ test "setupUinput creates device" {
 test "emitKey writes events and returns write errors" {
     // When fd_uinput is not set up, write should fail.
     fd_uinput = -1;
-    try std.testing.expectError(error.ShortWrite, emitKey(fd_uinput, c.KEY_ENTER, true));
+    try std.testing.expectError(error.ShortWrite, emitKey(fd_uinput, c.KEY_ENTER, .pressed));
 }
