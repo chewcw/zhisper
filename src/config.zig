@@ -105,6 +105,72 @@ pub fn freeConfig(gpa: std.mem.Allocator, cfg: Config) void {
     gpa.free(cfg.daemon.wav_path);
 }
 
+pub const EnvValues = struct {
+    provider: ?[]const u8 = null,
+    model: ?[]const u8 = null,
+    base_url: ?[]const u8 = null,
+    prompt: ?[]const u8 = null,
+    key_code: ?u16 = null,
+    mode: ?[]const u8 = null,
+    evdev: ?[]const u8 = null,
+    device: ?[]const u8 = null,
+    min_duration_ms: ?u32 = null,
+    wav_path: ?[]const u8 = null,
+    keep_wav_on_error: ?bool = null,
+    verbose: ?bool = null,
+};
+
+pub fn applyEnv(cfg: Config, env: EnvValues) Config {
+    var out = cfg;
+    if (env.provider) |v| out.transcribe.provider = v;
+    if (env.model) |v| out.transcribe.model = v;
+    if (env.base_url) |v| out.transcribe.base_url = v;
+    if (env.prompt) |v| out.transcribe.prompt = v;
+    if (env.key_code) |v| out.hotkey.key_code = v;
+    if (env.mode) |v| out.hotkey.mode = v;
+    if (env.evdev) |v| out.hotkey.evdev = v;
+    if (env.device) |v| out.audio.device = v;
+    if (env.min_duration_ms) |v| out.daemon.min_duration_ms = v;
+    if (env.wav_path) |v| out.daemon.wav_path = v;
+    if (env.keep_wav_on_error) |v| out.daemon.keep_wav_on_error = v;
+    if (env.verbose) |v| out.daemon.verbose = v;
+    return out;
+}
+
+pub fn applyCli(cfg: Config, cli: CliOverrides) Config {
+    return applyEnv(cfg, .{
+        .provider = cli.provider,
+        .model = cli.model,
+        .base_url = cli.base_url,
+        .prompt = cli.prompt,
+        .key_code = cli.key_code,
+        .mode = cli.mode,
+        .evdev = cli.evdev,
+        .device = cli.device,
+        .min_duration_ms = cli.min_duration_ms,
+        .wav_path = cli.wav_path,
+        .keep_wav_on_error = cli.keep_wav_on_error,
+        .verbose = cli.verbose,
+    });
+}
+
+pub fn validate(cfg: Config) !void {
+    const provider = cfg.transcribe.provider;
+    const known = std.mem.eql(u8, provider, "groq") or
+        std.mem.eql(u8, provider, "openai") or
+        std.mem.eql(u8, provider, "custom");
+    if (!known) return error.InvalidProvider;
+    // groq/openai fall back to built-in presets, so empty model/base_url is
+    // fine; custom has no preset, so both are required.
+    if (std.mem.eql(u8, provider, "custom")) {
+        if (cfg.transcribe.base_url.len == 0) return error.MissingBaseUrl;
+        if (cfg.transcribe.model.len == 0) return error.MissingModel;
+    }
+    if (!std.mem.eql(u8, cfg.hotkey.mode, "hold") and !std.mem.eql(u8, cfg.hotkey.mode, "toggle")) return error.InvalidMode;
+    if (cfg.hotkey.key_code == 0) return error.InvalidKeyCode;
+    if (cfg.daemon.min_duration_ms == 0) return error.InvalidDuration;
+}
+
 // Every TOML key the file is allowed to contain. checkUnknownFields is the
 // single owner of this list; the struct definitions above own the values.
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
@@ -190,4 +256,28 @@ test "parseFileConfig rejects api_key in file" {
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-key.toml", .data = "[transcribe]\napi_key = \"secret\"\n" });
     defer std.Io.Dir.cwd().deleteFile(io, "cfg-key.toml") catch {};
     try std.testing.expectError(error.ApiKeyInFile, parseFileConfig(gpa, io, "cfg-key.toml"));
+}
+
+test "applyEnv overlays file values" {
+    var cfg = defaultConfig();
+    cfg.hotkey.key_code = 67;
+    const out = applyEnv(cfg, .{ .provider = "openai", .model = "whisper-1", .evdev = "/dev/input/event5" });
+    try std.testing.expectEqualStrings("openai", out.transcribe.provider);
+    try std.testing.expectEqualStrings("whisper-1", out.transcribe.model);
+    try std.testing.expectEqualStrings("/dev/input/event5", out.hotkey.evdev);
+    // unset fields keep file values
+    try std.testing.expectEqual(@as(u16, 67), out.hotkey.key_code);
+}
+
+test "validate rejects custom without url and bad mode" {
+    var cfg = defaultConfig();
+    cfg.transcribe.provider = "custom";
+    cfg.transcribe.base_url = "";
+    try std.testing.expectError(error.MissingBaseUrl, validate(cfg));
+    cfg.transcribe.base_url = "http://localhost:8080/x";
+    cfg.transcribe.model = "";
+    try std.testing.expectError(error.MissingModel, validate(cfg));
+    cfg.transcribe.model = "m";
+    cfg.hotkey.mode = "bogus";
+    try std.testing.expectError(error.InvalidMode, validate(cfg));
 }
