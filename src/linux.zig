@@ -121,6 +121,26 @@ fn ioctlNoArg(fd: posix.fd_t, request: c_ulong) !void {
     if (c.ioctl(fd, request) == -1) return ioctlError();
 }
 
+pub fn emitKey(fd: posix.fd_t, code: u16, pressed: bool) !void {
+    const value: u32 = if (pressed) 1 else 0;
+    const ev_key = c.struct_input_event{
+        .type = c.EV_KEY,
+        .code = @intCast(code),
+        .value = @intCast(value),
+    };
+    const ev_syn = c.struct_input_event{
+        .type = c.EV_SYN,
+        .code = c.SYN_REPORT,
+        .value = 0,
+    };
+    const ev_key_bytes = std.mem.asBytes(&ev_key);
+    const ev_syn_bytes = std.mem.asBytes(&ev_syn);
+    const written_key = std.os.linux.write(fd, ev_key_bytes.ptr, ev_key_bytes.len);
+    if (written_key != ev_key_bytes.len) return error.ShortWrite;
+    const written_syn = std.os.linux.write(fd, ev_syn_bytes.ptr, ev_syn_bytes.len);
+    if (written_syn != ev_syn_bytes.len) return error.ShortWrite;
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
@@ -247,5 +267,5 @@ test "setupUinput creates device" {
 test "emitKey writes events and returns write errors" {
     // When fd_uinput is not set up, write should fail.
     fd_uinput = -1;
-    try std.testing.expectError(error.Unexpected, emitKey(fd_uinput, c.KEY_ENTER, true));
+    try std.testing.expectError(error.ShortWrite, emitKey(fd_uinput, c.KEY_ENTER, true));
 }
