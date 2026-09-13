@@ -45,6 +45,8 @@ pub fn build(b: *std.Build) void {
     });
     mod.addIncludePath(b.path("src"));
     mod.addCSourceFile(.{ .file = b.path("src/miniaudio.c") });
+    const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
+    mod.addImport("toml", toml_dep.module("toml"));
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -89,6 +91,8 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    const argz_dep = b.dependency("argz", .{ .target = target, .optimize = optimize });
+    exe.root_module.addImport("argz", argz_dep.module("argz"));
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
