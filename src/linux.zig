@@ -243,3 +243,9 @@ test "setupUinput creates device" {
     try setupUinput(io);
     try std.testing.expect(fd_uinput >= 0);
 }
+
+test "emitKey writes events and returns write errors" {
+    // When fd_uinput is not set up, write should fail.
+    fd_uinput = -1;
+    try std.testing.expectError(error.Unexpected, emitKey(fd_uinput, c.KEY_ENTER, true));
+}
