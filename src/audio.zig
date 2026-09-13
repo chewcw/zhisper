@@ -64,16 +64,23 @@ fn lockSpin() void {
     while (!spin.tryLock()) std.atomic.spinLoopHint();
 }
 
-pub fn setRecording(mode: u2, path: []const u8) !void {
+pub const RecordingMode = enum(u2) {
+    silent = 0,
+    start = 1,
+    stop = 2,
+    no_op = 3,
+};
+
+pub fn setRecording(mode: RecordingMode, path: []const u8) !void {
     switch (mode) {
-        0, 3 => return,
-        1 => {
+        .silent, .no_op => return,
+        .start => {
             if (active) return error.AlreadyRecording;
             samples.clearRetainingCapacity();
             try backend.start();
             active = true;
         },
-        2 => {
+        .stop => {
             if (!active) return error.NotRecording;
             try backend.stop();
             active = false;
@@ -101,8 +108,8 @@ test "mode 0 and 3 are silent no-ops" {
     backend = .{ .start = stubStart, .stop = stubStop };
     active = false;
     samples.clearRetainingCapacity();
-    try setRecording(0, "should-never-exist.wav");
-    try setRecording(3, "should-never-exist.wav");
+    try setRecording(.silent, "should-never-exist.wav");
+    try setRecording(.no_op, "should-never-exist.wav");
     try std.testing.expect(!active);
 }
 
@@ -114,12 +121,12 @@ test "double start errors, stop-while-idle errors" {
     defer samples.clearRetainingCapacity();
     active = false;
     samples.clearRetainingCapacity();
-    try setRecording(1, "ignored-on-start.wav");
+    try setRecording(.start, "ignored-on-start.wav");
     try std.testing.expect(active);
-    try std.testing.expectError(error.AlreadyRecording, setRecording(1, "ignored.wav"));
-    try setRecording(2, "task3-state.wav");
+    try std.testing.expectError(error.AlreadyRecording, setRecording(.start, "ignored.wav"));
+    try setRecording(.stop, "task3-state.wav");
     try std.testing.expect(!active);
-    try std.testing.expectError(error.NotRecording, setRecording(2, "task3-state.wav"));
+    try std.testing.expectError(error.NotRecording, setRecording(.stop, "task3-state.wav"));
     std.Io.Dir.cwd().deleteFile(std.testing.io, "task3-state.wav") catch {};
     std.Io.Dir.cwd().deleteFile(std.testing.io, "task3-state.wav.tmp") catch {};
 }
@@ -138,9 +145,9 @@ test "stop writes injected samples as parseable wav" {
     }
     active = false;
     samples.clearRetainingCapacity();
-    try setRecording(1, "ignored.wav");
+    try setRecording(.start, "ignored.wav");
     try appendStubSamplesForTest(&[_]i16{ 0, 1000, -1000 });
-    try setRecording(2, "task3-injected.wav");
+    try setRecording(.stop, "task3-injected.wav");
     var f = try std.Io.Dir.cwd().openFile(io, "task3-injected.wav", .{});
     defer f.close(io);
     var rbuf: [128]u8 = undefined;
@@ -164,9 +171,9 @@ test "live mic smoke test (opt-in)" {
     active = false;
     device_live = false;
     backend = .{ .start = maStart, .stop = maStop };
-    try setRecording(1, "ignored-live.wav");
+    try setRecording(.start, "ignored-live.wav");
     try io.sleep(.fromMilliseconds(500), .awake);
-    try setRecording(2, "live-smoke.wav");
+    try setRecording(.stop, "live-smoke.wav");
     defer std.Io.Dir.cwd().deleteFile(io, "live-smoke.wav") catch {};
     var f = try std.Io.Dir.cwd().openFile(io, "live-smoke.wav", .{});
     defer f.close(io);
