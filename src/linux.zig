@@ -154,6 +154,99 @@ pub fn tapKey(code: u16) !void {
     try emitKey(code, .released);
 }
 
+const KeyPress = struct { code: u16, shift: bool };
+
+/// US-layout byte → key mapping. KEY_* code values come from
+/// include/uapi/linux/input-event-codes.h; press/release value semantics
+/// (1 = press, 0 = release) per:
+/// https://www.kernel.org/doc/html/latest/input/event-codes.html
+fn keyForChar(ch: u8) ?KeyPress {
+    return switch (ch) {
+        'a' => .{ .code = c.KEY_A, .shift = false },
+        'b' => .{ .code = c.KEY_B, .shift = false },
+        'c' => .{ .code = c.KEY_C, .shift = false },
+        'd' => .{ .code = c.KEY_D, .shift = false },
+        'e' => .{ .code = c.KEY_E, .shift = false },
+        'f' => .{ .code = c.KEY_F, .shift = false },
+        'g' => .{ .code = c.KEY_G, .shift = false },
+        'h' => .{ .code = c.KEY_H, .shift = false },
+        'i' => .{ .code = c.KEY_I, .shift = false },
+        'j' => .{ .code = c.KEY_J, .shift = false },
+        'k' => .{ .code = c.KEY_K, .shift = false },
+        'l' => .{ .code = c.KEY_L, .shift = false },
+        'm' => .{ .code = c.KEY_M, .shift = false },
+        'n' => .{ .code = c.KEY_N, .shift = false },
+        'o' => .{ .code = c.KEY_O, .shift = false },
+        'p' => .{ .code = c.KEY_P, .shift = false },
+        'q' => .{ .code = c.KEY_Q, .shift = false },
+        'r' => .{ .code = c.KEY_R, .shift = false },
+        's' => .{ .code = c.KEY_S, .shift = false },
+        't' => .{ .code = c.KEY_T, .shift = false },
+        'u' => .{ .code = c.KEY_U, .shift = false },
+        'v' => .{ .code = c.KEY_V, .shift = false },
+        'w' => .{ .code = c.KEY_W, .shift = false },
+        'x' => .{ .code = c.KEY_X, .shift = false },
+        'y' => .{ .code = c.KEY_Y, .shift = false },
+        'z' => .{ .code = c.KEY_Z, .shift = false },
+        'A'...'Z' => .{ .code = @intCast(keyForChar(ch + 32).?.code), .shift = true },
+        '0' => .{ .code = c.KEY_0, .shift = false },
+        '1'...'9' => .{ .code = @intCast(@as(c_int, c.KEY_1) + (ch - '1')), .shift = false },
+        ' ' => .{ .code = c.KEY_SPACE, .shift = false },
+        '\n' => .{ .code = c.KEY_ENTER, .shift = false },
+        '\t' => .{ .code = c.KEY_TAB, .shift = false },
+        '.' => .{ .code = c.KEY_DOT, .shift = false },
+        ',' => .{ .code = c.KEY_COMMA, .shift = false },
+        '-' => .{ .code = c.KEY_MINUS, .shift = false },
+        '=' => .{ .code = c.KEY_EQUAL, .shift = false },
+        ';' => .{ .code = c.KEY_SEMICOLON, .shift = false },
+        '\'' => .{ .code = c.KEY_APOSTROPHE, .shift = false },
+        '/' => .{ .code = c.KEY_SLASH, .shift = false },
+        '[' => .{ .code = c.KEY_LEFTBRACE, .shift = false },
+        ']' => .{ .code = c.KEY_RIGHTBRACE, .shift = false },
+        '`' => .{ .code = c.KEY_GRAVE, .shift = false },
+        '\\' => .{ .code = c.KEY_BACKSLASH, .shift = false },
+        '!' => .{ .code = c.KEY_1, .shift = true },
+        '@' => .{ .code = c.KEY_2, .shift = true },
+        '#' => .{ .code = c.KEY_3, .shift = true },
+        '$' => .{ .code = c.KEY_4, .shift = true },
+        '%' => .{ .code = c.KEY_5, .shift = true },
+        '^' => .{ .code = c.KEY_6, .shift = true },
+        '&' => .{ .code = c.KEY_7, .shift = true },
+        '*' => .{ .code = c.KEY_8, .shift = true },
+        '(' => .{ .code = c.KEY_9, .shift = true },
+        ')' => .{ .code = c.KEY_0, .shift = true },
+        '_' => .{ .code = c.KEY_MINUS, .shift = true },
+        '+' => .{ .code = c.KEY_EQUAL, .shift = true },
+        ':' => .{ .code = c.KEY_SEMICOLON, .shift = true },
+        '"' => .{ .code = c.KEY_APOSTROPHE, .shift = true },
+        '?' => .{ .code = c.KEY_SLASH, .shift = true },
+        '<' => .{ .code = c.KEY_COMMA, .shift = true },
+        '>' => .{ .code = c.KEY_DOT, .shift = true },
+        else => null,
+    };
+}
+
+fn tapCode(code: u16, shift: bool) !void {
+    if (shift) try emitKey(c.KEY_LEFTSHIFT, .pressed);
+    errdefer if (shift) emitKey(c.KEY_LEFTSHIFT, .released) catch {};
+    try emitKey(code, .pressed);
+    try emitKey(code, .released);
+    if (shift) try emitKey(c.KEY_LEFTSHIFT, .released);
+}
+
+/// Types UTF-8 ASCII text via the uinput device. US layout. Returns
+/// characters injected; stops at the first unmapped byte.
+pub fn typeText(text: []const u8) !usize {
+    if (fd_uinput < 0) return error.NotSetup;
+    var count: usize = 0;
+    for (text) |ch| {
+        const kp = keyForChar(ch) orelse return error.UnsupportedCharacter;
+        try tapCode(kp.code, kp.shift);
+        count += 1;
+    }
+    return count;
+}
+
 test {
     std.testing.refAllDecls(@This());
 }
@@ -290,4 +383,26 @@ test "tapKey without setup returns NotSetup" {
     fd_uinput = -1;
     defer fd_uinput = saved;
     try std.testing.expectError(error.NotSetup, tapKey(c.KEY_A));
+}
+
+test "keyForChar maps letters, digits, punctuation and shift" {
+    const A = keyForChar('a').?;
+    try std.testing.expectEqual(@as(u16, @intCast(c.KEY_A)), A.code);
+    try std.testing.expectEqual(false, A.shift);
+    const CapA = keyForChar('A').?;
+    try std.testing.expectEqual(@as(u16, @intCast(c.KEY_A)), CapA.code);
+    try std.testing.expectEqual(true, CapA.shift);
+    try std.testing.expectEqual(@as(u16, @intCast(c.KEY_1)), keyForChar('1').?.code);
+    try std.testing.expectEqual(@as(u16, @intCast(c.KEY_SPACE)), keyForChar(' ').?.code);
+    try std.testing.expectEqual(@as(u16, @intCast(c.KEY_ENTER)), keyForChar('\n').?.code);
+    try std.testing.expectEqual(@as(u16, @intCast(c.KEY_DOT)), keyForChar('.').?.code);
+    try std.testing.expect(keyForChar('!').?.shift);
+    try std.testing.expect(keyForChar(0xC3) == null);
+}
+
+test "typeText without setup returns NotSetup" {
+    const saved = fd_uinput;
+    fd_uinput = -1;
+    defer fd_uinput = saved;
+    try std.testing.expectError(error.NotSetup, typeText("hi"));
 }
