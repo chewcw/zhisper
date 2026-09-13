@@ -122,7 +122,14 @@ fn ioctlNoArg(fd: posix.fd_t, request: c_ulong) !void {
     if (c.ioctl(fd, request) == -1) return ioctlError();
 }
 
-pub fn emitKey(fd: posix.fd_t, code: u16, action: KeyEvent) !void {
+/// Writes one key event plus the closing SYN report to the uinput device.
+/// Protocol (key press, report, key release, report) and the ioctls used in
+/// setupUinput (UI_SET_EVBIT / UI_SET_KEYBIT / UI_DEV_SETUP / UI_DEV_CREATE)
+/// follow the kernel uinput docs:
+/// https://www.kernel.org/doc/html/latest/input/uinput.html
+/// Timestamps are left zeroed — the kernel ignores them for uinput writes.
+pub fn emitKey(code: u16, action: KeyEvent) !void {
+    if (fd_uinput < 0) return error.NotSetup;
     const value: u32 = if (action == .pressed) 1 else 0;
     const ev_key = c.struct_input_event{
         .type = c.EV_KEY,
@@ -136,9 +143,9 @@ pub fn emitKey(fd: posix.fd_t, code: u16, action: KeyEvent) !void {
     };
     const ev_key_bytes = std.mem.asBytes(&ev_key);
     const ev_syn_bytes = std.mem.asBytes(&ev_syn);
-    const written_key = std.os.linux.write(fd, ev_key_bytes.ptr, ev_key_bytes.len);
+    const written_key = std.os.linux.write(fd_uinput, ev_key_bytes.ptr, ev_key_bytes.len);
     if (written_key != ev_key_bytes.len) return error.ShortWrite;
-    const written_syn = std.os.linux.write(fd, ev_syn_bytes.ptr, ev_syn_bytes.len);
+    const written_syn = std.os.linux.write(fd_uinput, ev_syn_bytes.ptr, ev_syn_bytes.len);
     if (written_syn != ev_syn_bytes.len) return error.ShortWrite;
 }
 
@@ -265,8 +272,10 @@ test "setupUinput creates device" {
     try std.testing.expect(fd_uinput >= 0);
 }
 
-test "emitKey writes events and returns write errors" {
-    // When fd_uinput is not set up, write should fail.
+test "emitKey without setup returns NotSetup" {
+    const saved = fd_uinput;
     fd_uinput = -1;
-    try std.testing.expectError(error.ShortWrite, emitKey(fd_uinput, c.KEY_ENTER, .pressed));
+    defer fd_uinput = saved;
+    try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .pressed));
+    try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .released));
 }
