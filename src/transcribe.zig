@@ -58,6 +58,28 @@ pub fn resolveConfig(preset: Preset, key_value: ?[]const u8, model_override: ?[]
     return .{ .base_url = base_url, .model = model, .api_key = key };
 }
 
+fn envVal(name: [*:0]const u8) ?[]const u8 {
+    const raw = std.c.getenv(name) orelse return null;
+    if (raw[0] == 0) return null;
+    return std.mem.span(raw);
+}
+
+/// Single env entry point. Reads ZHISPER_PROVIDER (default groq),
+/// ZHISPER_MODEL / ZHISPER_BASE_URL overrides, and the key from
+/// ZHISPER_API_KEY first then the provider-specific var. Explicit args beat env.
+pub fn configFromEnv(model_override: ?[]const u8, base_url_override: ?[]const u8) !Config {
+    const provider = providerFromName(envVal("ZHISPER_PROVIDER"));
+    const preset = presetFor(provider);
+    const key = envVal("ZHISPER_API_KEY") orelse switch (provider) {
+        .groq => envVal("GROQ_API_KEY"),
+        .openai => envVal("OPENAI_API_KEY"),
+        .custom => envVal("ZHISPER_API_KEY"),
+    };
+    const model_env = envVal("ZHISPER_MODEL");
+    const url_env = envVal("ZHISPER_BASE_URL");
+    return try resolveConfig(preset, key, model_override orelse model_env, base_url_override orelse url_env);
+}
+
 pub fn buildMultipart(gpa: std.mem.Allocator, boundary: []const u8, wav_bytes: []const u8, filename: []const u8, model: []const u8, prompt: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
@@ -184,9 +206,9 @@ test "transcribeWithKey against discard port fails without network" {
     try std.testing.expect(err != error.MissingText);
 }
 
-test "live Groq transcribe (opt-in)" {
+test "live transcribe via provider config (opt-in)" {
     if (std.c.getenv("TRANSCRIBE_LIVE") == null) return error.SkipZigTest;
-    if (std.c.getenv("GROQ_API_KEY") == null) return error.SkipZigTest;
+    const cfg = configFromEnv(null, null) catch return error.SkipZigTest;
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     // Tiny silence WAV (16 samples) — proves auth + multipart + parse end-to-end.
@@ -200,7 +222,7 @@ test "live Groq transcribe (opt-in)" {
     try aw.writer.writeAll(std.mem.sliceAsBytes(&silence));
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "live-transcribe.wav", .data = aw.writer.buffered() });
     defer std.Io.Dir.cwd().deleteFile(io, "live-transcribe.wav") catch {};
-    const got = try transcribe(io, gpa, "live-transcribe.wav", .{});
+    const got = try transcribeWithConfig(io, gpa, "live-transcribe.wav", cfg);
     defer gpa.free(got);
     // Silence may transcribe to empty; what matters is it is trimmed (no leading space).
     try std.testing.expect(got.len == 0 or got[0] != ' ');
