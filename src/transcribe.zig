@@ -12,6 +12,52 @@ pub const Options = struct {
     base_url: []const u8 = default_base_url,
 };
 
+pub const Provider = enum { groq, openai, custom };
+
+pub const Preset = struct {
+    base_url: []const u8,
+    model: []const u8,
+    key_env: []const u8,
+};
+
+pub fn presetFor(p: Provider) Preset {
+    return switch (p) {
+        .groq => .{ .base_url = default_base_url, .model = default_model, .key_env = "GROQ_API_KEY" },
+        .openai => .{ .base_url = "https://api.openai.com/v1/audio/transcriptions", .model = "whisper-1", .key_env = "OPENAI_API_KEY" },
+        .custom => .{ .base_url = "", .model = "", .key_env = "ZHISPER_API_KEY" },
+    };
+}
+
+/// Maps ZHISPER_PROVIDER value to a provider. Null/unknown/groq -> groq except
+/// explicit "openai"/"custom". Unknown strings map to custom so a typo surfaces
+/// as MissingBaseUrl (explicit URL required) instead of silently hitting Groq.
+pub fn providerFromName(name: ?[]const u8) Provider {
+    const n = name orelse return .groq;
+    if (std.mem.eql(u8, n, "openai")) return .openai;
+    if (std.mem.eql(u8, n, "custom")) return .custom;
+    if (std.mem.eql(u8, n, "groq")) return .groq;
+    return .custom;
+}
+
+pub const Config = struct {
+    base_url: []const u8,
+    model: []const u8,
+    api_key: []const u8,
+    prompt: []const u8 = "",
+};
+
+/// Pure resolution (no getenv): preset defaults + explicit overrides + already-resolved key.
+/// Empty key counts as missing (matches existing apiKey() empty check).
+pub fn resolveConfig(preset: Preset, key_value: ?[]const u8, model_override: ?[]const u8, base_url_override: ?[]const u8) !Config {
+    const key = key_value orelse return error.MissingApiKey;
+    if (key.len == 0) return error.MissingApiKey;
+    const model = model_override orelse preset.model;
+    const base_url = base_url_override orelse preset.base_url;
+    if (base_url.len == 0) return error.MissingBaseUrl;
+    if (model.len == 0) return error.MissingModel;
+    return .{ .base_url = base_url, .model = model, .api_key = key };
+}
+
 pub fn buildMultipart(gpa: std.mem.Allocator, boundary: []const u8, wav_bytes: []const u8, filename: []const u8, model: []const u8, prompt: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     errdefer aw.deinit();
@@ -149,4 +195,36 @@ test "live Groq transcribe (opt-in)" {
     defer gpa.free(got);
     // Silence may transcribe to empty; what matters is it is trimmed (no leading space).
     try std.testing.expect(got.len == 0 or got[0] != ' ');
+}
+
+test "presetFor returns groq and openai presets" {
+    const groq = presetFor(.groq);
+    try std.testing.expectEqualStrings("https://api.groq.com/openai/v1/audio/transcriptions", groq.base_url);
+    try std.testing.expectEqualStrings("whisper-large-v3-turbo", groq.model);
+    try std.testing.expectEqualStrings("GROQ_API_KEY", groq.key_env);
+    const openai = presetFor(.openai);
+    try std.testing.expectEqualStrings("https://api.openai.com/v1/audio/transcriptions", openai.base_url);
+    try std.testing.expectEqualStrings("whisper-1", openai.model);
+    try std.testing.expectEqualStrings("OPENAI_API_KEY", openai.key_env);
+}
+
+test "providerFromName defaults groq, maps openai and custom" {
+    try std.testing.expectEqual(Provider.groq, providerFromName(null));
+    try std.testing.expectEqual(Provider.groq, providerFromName("groq"));
+    try std.testing.expectEqual(Provider.openai, providerFromName("openai"));
+    try std.testing.expectEqual(Provider.custom, providerFromName("custom"));
+    try std.testing.expectEqual(Provider.custom, providerFromName("bogus"));
+}
+
+test "resolveConfig uses preset unless overridden, rejects missing key" {
+    const groq = presetFor(.groq);
+    const cfg = try resolveConfig(groq, "k123", null, null);
+    try std.testing.expectEqualStrings(groq.base_url, cfg.base_url);
+    try std.testing.expectEqualStrings(groq.model, cfg.model);
+    try std.testing.expectEqualStrings("k123", cfg.api_key);
+    const over = try resolveConfig(groq, "k123", "my-model", "http://localhost:8080/x");
+    try std.testing.expectEqualStrings("my-model", over.model);
+    try std.testing.expectEqualStrings("http://localhost:8080/x", over.base_url);
+    try std.testing.expectError(error.MissingApiKey, resolveConfig(groq, null, null, null));
+    try std.testing.expectError(error.MissingApiKey, resolveConfig(groq, "", null, null));
 }
