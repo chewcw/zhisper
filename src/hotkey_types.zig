@@ -5,7 +5,7 @@ const std = @import("std");
 /// targets, including test builds.
 pub const KeyEvent = enum { pressed, released };
 pub const Mode = enum { hold, toggle };
-pub const HotkeyConfig = struct { key_code: u16, mode: Mode = .hold };
+pub const HotkeyConfig = struct { key_code: u16, mode: Mode = .hold, evdev: []const u8 = "" };
 
 test "default mode is hold" {
     const cfg = HotkeyConfig{ .key_code = 16 };

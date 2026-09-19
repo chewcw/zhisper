@@ -19,6 +19,15 @@ fn closeFd(fd: posix.fd_t) void {
     _ = std.os.linux.close(fd);
 }
 
+fn pickEvdevPath(config_evdev: []const u8) ?[]const u8 {
+    if (config_evdev.len > 0) return config_evdev;
+    if (std.c.getenv("ZHISPER_EVDEV")) |raw| {
+        const path = std.mem.span(raw);
+        if (path.len > 0) return path;
+    }
+    return null;
+}
+
 /// WHY this exists: /dev/input/event0, event1, ... are numbered randomly —
 /// event0 might be your mouse, a power button, or a webcam. We cannot guess.
 /// So we ask every candidate device "which keys can you press?" and only
@@ -78,11 +87,7 @@ fn openPath(path: []const u8) !?posix.fd_t {
 
 pub fn setup(config: HotkeyConfig) !void {
     destroy();
-    if (std.c.getenv("ZHISPER_EVDEV")) |raw| {
-        // WHY the env override first: auto-scan can pick the wrong keyboard
-        // on machines with several (laptop + USB + virtual). Setting
-        // ZHISPER_EVDEV=/dev/input/event5 pins the exact device, no guessing.
-        const path = std.mem.span(raw);
+    if (pickEvdevPath(config.evdev)) |path| {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
@@ -186,4 +191,12 @@ test "pollEvent without setup returns null" {
     fd_evdev = -1;
     defer fd_evdev = saved_fd;
     try std.testing.expect(pollEvent() == null);
+}
+
+test "setup prefers config evdev over auto-scan" {
+    // Config-provided path wins when set; tested via the pure picker below.
+    // Full device open needs /dev/input permissions, so this test only
+    // checks the picker, never touches hardware.
+    try std.testing.expectEqualStrings("/dev/input/event5", pickEvdevPath("/dev/input/event5").?);
+    try std.testing.expect(pickEvdevPath("") == null);
 }
