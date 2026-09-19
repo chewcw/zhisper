@@ -106,17 +106,192 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
     }
 }
 
+var stop_requested: std.atomic.Value(bool) = .init(false);
+
+fn onSignal(_: std.posix.SIG) callconv(.c) void {
+    stop_requested.store(true, .monotonic);
+}
+
+const WorkQueue = struct {
+    // Single-slot handoff between the poll loop (producer) and the one
+    // worker thread (consumer). Capacity is 1 active job + 1 waiting job;
+    // when full, the loop deletes the waiting WAV and enqueues the newest
+    // clip ("drop oldest"), so memory stays bounded no matter how fast
+    // the user presses the key. Every field below is guarded by mutex.
+    mutex: std.Io.Mutex = .init,
+    // True when pending_path holds a clip the worker has not picked up yet.
+    has_pending: bool = false,
+    // Fixed buffer for the waiting clip's path. 512 covers OS config-dir
+    // paths plus the per-recording counter suffix from uniqueWavPath.
+    pending_path: [512]u8 = undefined,
+    // Valid bytes in pending_path (paths are not NUL-terminated here).
+    pending_len: usize = 0,
+    // Set once by main on SIGINT/SIGTERM. Worker drains at most the active
+    // plus one waiting job ("finish the sentence"), then exits.
+    shutdown: bool = false,
+};
+
+fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, api_key: []const u8, q: *WorkQueue) void {
+    var path_buf: [512]u8 = undefined;
+    while (true) {
+        q.mutex.lockUncancelable(io);
+        while (!q.has_pending and !q.shutdown) {
+            q.mutex.unlock(io);
+            io.sleep(.fromMilliseconds(10), .awake) catch {};
+            q.mutex.lockUncancelable(io);
+        }
+        if (!q.has_pending and q.shutdown) {
+            q.mutex.unlock(io);
+            break;
+        }
+        const len = q.pending_len;
+        @memcpy(path_buf[0..len], q.pending_path[0..len]);
+        q.has_pending = false;
+        q.mutex.unlock(io);
+        const wav_path = path_buf[0..len];
+        const t_cfg = buildTranscribeConfig(cfg, api_key);
+        const text = zhisper.transcribe.transcribeWithConfig(io, gpa, wav_path, t_cfg) catch |err| {
+            if (cfg.daemon.verbose) std.debug.print("transcribe failed: {s}\n", .{@errorName(err)});
+            if (!cfg.daemon.keep_wav_on_error) std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
+            continue;
+        };
+        defer gpa.free(text);
+        const n = zhisper.inject.typeText(text) catch |err| {
+            if (cfg.daemon.verbose) std.debug.print("inject failed: {s}\n", .{@errorName(err)});
+            continue;
+        };
+        if (cfg.daemon.verbose) std.debug.print("typed {d} chars\n", .{n});
+        std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    const gpa = init.arena.allocator();
-    zhisper.audio.init(io, gpa);
+    const arena = init.arena.allocator();
 
-    const path = "/tmp/test.wav";
-    try zhisper.audio.setRecording(.start, path);
+    const argv = try init.minimal.args.toSlice(arena);
+    const overrides = try cli.parseCli(arena, io, argv);
 
-    try io.sleep(.fromSeconds(2), .awake);
+    const cfg_path = try resolveConfigPath(arena);
+    const cfg = zhisper.config.load(arena, io, cfg_path, overrides) catch |err| {
+        var errbuf: [256]u8 = undefined;
+        var w = std.Io.File.stderr().writer(io, &errbuf);
+        w.interface.print("zhisper: config error: {s}\n", .{@errorName(err)}) catch {};
+        std.process.exit(1);
+    };
+    defer zhisper.config.freeConfig(arena, cfg);
+    try zhisper.config.validate(cfg);
 
-    try zhisper.audio.setRecording(.stop, path);
+    const mode = try modeFromString(cfg.hotkey.mode);
+    if (cfg.audio.device.len > 0 and cfg.daemon.verbose) {
+        std.debug.print("zhisper: device selection deferred, using default mic\n", .{});
+    }
+
+    // POSIX signals only: on Windows std.posix.Sigaction is void, so this
+    // block is pruned at comptime there (abrupt Ctrl-C instead of graceful).
+    {
+        const builtin = @import("builtin");
+        if (comptime builtin.os.tag != .windows) {
+            var act: std.posix.Sigaction = .{ .handler = .{ .handler = onSignal }, .mask = std.posix.sigemptyset(), .flags = 0 };
+            std.posix.sigaction(.INT, &act, null);
+            std.posix.sigaction(.TERM, &act, null);
+        }
+    }
+
+    zhisper.audio.init(io, arena);
+    zhisper.inject.setup(io) catch |err| {
+        std.debug.print("zhisper: inject setup failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer zhisper.inject.destroy();
+    zhisper.hotkey.setup(.{ .key_code = cfg.hotkey.key_code, .mode = mode, .evdev = cfg.hotkey.evdev }) catch |err| {
+        std.debug.print("zhisper: hotkey setup failed: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    defer zhisper.hotkey.destroy();
+
+    const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
+    const api_key = resolveApiKey(provider) orelse {
+        std.debug.print("zhisper: missing API key (set ZHISPER_API_KEY or provider key)\n", .{});
+        std.process.exit(1);
+    };
+
+    var queue = WorkQueue{};
+    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue });
+
+    var loop_state = LoopState{ .mode = mode };
+    var start_ts: std.Io.Clock.Timestamp = undefined;
+    var have_start = false;
+    var wav_counter: u32 = 0;
+    std.debug.print("zhisper: listening (mode={s}, key={d})\n", .{ cfg.hotkey.mode, cfg.hotkey.key_code });
+
+    while (!stop_requested.load(.monotonic)) {
+        const ev = zhisper.hotkey.pollEvent();
+        if (ev) |e| {
+            const action = handleHotkeyEvent(&loop_state, e);
+            switch (action) {
+                .ignore => {},
+                .start => {
+                    start_ts = std.Io.Clock.Timestamp.now(io, .awake);
+                    have_start = true;
+                    zhisper.audio.setRecording(.start, "") catch |err| {
+                        if (cfg.daemon.verbose) std.debug.print("record start failed: {s}\n", .{@errorName(err)});
+                        loop_state.recording = false;
+                        have_start = false;
+                    };
+                },
+                .stop => {
+                    wav_counter += 1;
+                    const wav_path = try uniqueWavPath(arena, cfg.daemon.wav_path, wav_counter);
+                    defer arena.free(wav_path);
+                    zhisper.audio.setRecording(.stop, wav_path) catch |err| {
+                        if (cfg.daemon.verbose) std.debug.print("record stop failed: {s}\n", .{@errorName(err)});
+                        continue;
+                    };
+                    const now_ts = std.Io.Clock.Timestamp.now(io, .awake);
+                    const elapsed_ns: u64 = if (have_start) @intCast(start_ts.durationTo(now_ts).raw.nanoseconds) else 0;
+                    have_start = false;
+                    if (elapsed_ns < @as(u64, cfg.daemon.min_duration_ms) * 1_000_000) {
+                        if (cfg.daemon.verbose) std.debug.print("discarded short press ({d}ns)\n", .{elapsed_ns});
+                        std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
+                        continue;
+                    }
+                    const stat = std.Io.Dir.cwd().statFile(io, wav_path, .{}) catch continue;
+                    if (stat.size < 44 + minWavPayloadBytes(cfg.daemon.min_duration_ms)) {
+                        if (cfg.daemon.verbose) std.debug.print("discarded quiet clip ({d} bytes)\n", .{stat.size});
+                        std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
+                        continue;
+                    }
+                    queue.mutex.lockUncancelable(io);
+                    if (queue.has_pending) {
+                        var old: [512]u8 = undefined;
+                        @memcpy(old[0..queue.pending_len], queue.pending_path[0..queue.pending_len]);
+                        const old_path = old[0..queue.pending_len];
+                        queue.mutex.unlock(io);
+                        std.Io.Dir.cwd().deleteFile(io, old_path) catch {};
+                        if (cfg.daemon.verbose) std.debug.print("worker busy, dropped oldest clip\n", .{});
+                        queue.mutex.lockUncancelable(io);
+                    }
+                    const copy_len = @min(wav_path.len, queue.pending_path.len);
+                    @memcpy(queue.pending_path[0..copy_len], wav_path[0..copy_len]);
+                    queue.pending_len = copy_len;
+                    queue.has_pending = true;
+                    queue.mutex.unlock(io);
+                },
+            }
+        } else {
+            try io.sleep(.fromMilliseconds(5), .awake);
+        }
+    }
+
+    // Graceful shutdown: abandon an active recording (no WAV written),
+    // let the worker finish at most current + one waiting job, then exit.
+    if (loop_state.recording) zhisper.audio.shutdown();
+    queue.mutex.lockUncancelable(io);
+    queue.shutdown = true;
+    queue.mutex.unlock(io);
+    worker.join();
+    zhisper.audio.shutdown();
 }
 
 test "modeFromString maps hold and toggle" {
