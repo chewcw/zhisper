@@ -16,6 +16,9 @@ const help_text =
     \\.      --evdev=<str>         Linux evdev path (empty = auto-scan)
     \\.      --device=<str>        mic device (empty = default)
     \\.      --wav-path=<str>      wav output path
+    \\.      --min-duration-ms=<uint>  discard recordings shorter than this (ms)
+    \\.      --keep-wav            keep WAV on error (default keep)
+    \\.      --no-keep-wav         do not keep WAV on error
     \\.  -v, --verbose             verbose logging
     \\
 ;
@@ -40,6 +43,9 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.evdev) |v| cli.evdev = v;
     if (parsed.device) |v| cli.device = v;
     if (parsed.@"wav-path") |v| cli.wav_path = v;
+    if (parsed.@"min-duration-ms") |v| cli.min_duration_ms = std.math.cast(u32, v);
+    if (parsed.@"keep-wav" > 0) cli.keep_wav_on_error = true;
+    if (parsed.@"no-keep-wav" > 0) cli.keep_wav_on_error = false;
     if (parsed.verbose > 0) cli.verbose = true;
     return cli;
 }
@@ -64,4 +70,23 @@ test "cli defaults to no overrides" {
     try std.testing.expect(cli.provider == null);
     try std.testing.expect(cli.key_code == null);
     try std.testing.expect(cli.verbose == null);
+}
+
+test "cli parses min-duration and keep-wav flags" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--min-duration-ms=800", "--keep-wav" };
+    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqual(@as(u32, 800), got.min_duration_ms.?);
+    try std.testing.expectEqual(true, got.keep_wav_on_error.?);
+}
+
+test "cli parses no-keep-wav as false" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--no-keep-wav" };
+    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqual(false, got.keep_wav_on_error.?);
 }
