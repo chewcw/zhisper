@@ -69,6 +69,43 @@ fn resolveConfigPath(gpa: std.mem.Allocator) ![]u8 {
     return try std.fmt.allocPrint(gpa, "{s}/.config/zhisper/config.toml", .{home});
 }
 
+const Action = enum { start, stop, ignore };
+
+const LoopState = struct {
+    mode: zhisper.hotkey.Mode,
+    recording: bool = false,
+    press_count: u32 = 0,
+};
+
+fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
+    switch (s.mode) {
+        .hold => switch (ev) {
+            .pressed => {
+                if (s.recording) return .ignore;
+                s.recording = true;
+                return .start;
+            },
+            .released => {
+                if (!s.recording) return .ignore;
+                s.recording = false;
+                return .stop;
+            },
+        },
+        .toggle => switch (ev) {
+            .released => return .ignore,
+            .pressed => {
+                s.press_count += 1;
+                if (!s.recording) {
+                    s.recording = true;
+                    return .start;
+                }
+                s.recording = false;
+                return .stop;
+            },
+        },
+    }
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
@@ -109,4 +146,20 @@ test "buildTranscribeConfig copies provider fields plus key" {
     try std.testing.expectEqualStrings("m", t.model);
     try std.testing.expectEqualStrings("k123", t.api_key);
     try std.testing.expectEqualStrings("p", t.prompt);
+}
+
+test "hold press starts, release stops, extras ignored" {
+    var s = LoopState{ .mode = .hold };
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .pressed));
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .released));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
+}
+
+test "toggle alternates on press and ignores release" {
+    var s = LoopState{ .mode = .toggle };
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
 }
