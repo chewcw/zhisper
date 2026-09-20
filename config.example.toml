@@ -13,7 +13,8 @@ prompt = ""
 [hotkey]
 key_code = 67     # OS-native (Linux KEY_F9=67)
 mode = "hold"     # hold | toggle
-evdev = ""        # Linux only, empty = auto-scan
+evdev = ""        # Linux only, explicit /dev/input/eventN (empty = off, wins over evdev_name)
+evdev_name = ""   # Linux only, device name match e.g. "kanata" (empty = off, wins over auto-scan)
 
 [audio]
 device = ""       # empty = system default mic

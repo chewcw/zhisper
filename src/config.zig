@@ -12,6 +12,7 @@ pub const HotkeyCfg = struct {
     key_code: u16 = 67,
     mode: []const u8 = "hold",
     evdev: []const u8 = "",
+    evdev_name: []const u8 = "",
 };
 
 pub const AudioCfg = struct {
@@ -44,6 +45,7 @@ pub const CliOverrides = struct {
     key_code: ?u16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
+    evdev_name: ?[]const u8 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -82,6 +84,8 @@ pub fn dupeConfig(gpa: std.mem.Allocator, cfg: Config) !Config {
     errdefer gpa.free(out.hotkey.mode);
     out.hotkey.evdev = try gpa.dupe(u8, cfg.hotkey.evdev);
     errdefer gpa.free(out.hotkey.evdev);
+    out.hotkey.evdev_name = try gpa.dupe(u8, cfg.hotkey.evdev_name);
+    errdefer gpa.free(out.hotkey.evdev_name);
     out.audio.device = try gpa.dupe(u8, cfg.audio.device);
     errdefer gpa.free(out.audio.device);
     out.daemon.wav_path = try gpa.dupe(u8, cfg.daemon.wav_path);
@@ -97,6 +101,7 @@ pub fn freeConfig(gpa: std.mem.Allocator, cfg: Config) void {
     gpa.free(cfg.transcribe.prompt);
     gpa.free(cfg.hotkey.mode);
     gpa.free(cfg.hotkey.evdev);
+    gpa.free(cfg.hotkey.evdev_name);
     gpa.free(cfg.audio.device);
     gpa.free(cfg.daemon.wav_path);
 }
@@ -109,6 +114,7 @@ pub const EnvValues = struct {
     key_code: ?u16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
+    evdev_name: ?[]const u8 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -125,6 +131,7 @@ pub fn applyEnv(cfg: Config, env: EnvValues) Config {
     if (env.key_code) |v| out.hotkey.key_code = v;
     if (env.mode) |v| out.hotkey.mode = v;
     if (env.evdev) |v| out.hotkey.evdev = v;
+    if (env.evdev_name) |v| out.hotkey.evdev_name = v;
     if (env.device) |v| out.audio.device = v;
     if (env.min_duration_ms) |v| out.daemon.min_duration_ms = v;
     if (env.wav_path) |v| out.daemon.wav_path = v;
@@ -142,6 +149,7 @@ pub fn applyCli(cfg: Config, cli: CliOverrides) Config {
         .key_code = cli.key_code,
         .mode = cli.mode,
         .evdev = cli.evdev,
+        .evdev_name = cli.evdev_name,
         .device = cli.device,
         .min_duration_ms = cli.min_duration_ms,
         .wav_path = cli.wav_path,
@@ -199,6 +207,7 @@ pub fn readEnvValues() EnvValues {
         .key_code = envU16("ZHISPER_KEY_CODE"),
         .mode = envStr("ZHISPER_MODE"),
         .evdev = envStr("ZHISPER_EVDEV"),
+        .evdev_name = envStr("ZHISPER_EVDEV_NAME"),
         .device = envStr("ZHISPER_DEVICE"),
         .min_duration_ms = envU32("ZHISPER_MIN_DURATION_MS"),
         .wav_path = envStr("ZHISPER_WAV_PATH"),
@@ -231,7 +240,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8, cli: CliOverri
 // single owner of this list; the struct definitions above own the values.
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
-    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev" } },
+    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name" } },
     .{ .name = "audio", .keys = &.{ "device" } },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "verbose" } },
 };
@@ -328,6 +337,14 @@ test "applyEnv overlays file values" {
     try std.testing.expectEqualStrings("/dev/input/event5", out.hotkey.evdev);
     // unset fields keep file values
     try std.testing.expectEqual(@as(u16, 67), out.hotkey.key_code);
+}
+
+test "applyEnv overlays evdev_name" {
+    const cfg = defaultConfig();
+    const out = applyEnv(cfg, .{ .evdev_name = "kanata" });
+    try std.testing.expectEqualStrings("kanata", out.hotkey.evdev_name);
+    // unset fields keep file values
+    try std.testing.expectEqualStrings("", cfg.hotkey.evdev_name);
 }
 
 test "validate rejects custom without url and bad mode" {

@@ -13,7 +13,7 @@ const help_text =
     \\.      --prompt=<str>        transcription prompt
     \\.      --key-code=<uint>     OS-native hotkey code (default 67=F9)
     \\.      --mode=<str>          hold | toggle
-    \\.      --evdev=<str>         Linux evdev path (empty = auto-scan)
+    \\.      --evdev=<str>         Linux evdev path or name:DEVICE (empty = auto-scan)
     \\.      --device=<str>        mic device (empty = default)
     \\.      --wav-path=<str>      wav output path
     \\.      --min-duration-ms=<uint>  discard recordings shorter than this (ms)
@@ -40,7 +40,15 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.prompt) |v| cli.prompt = v;
     if (parsed.@"key-code") |v| cli.key_code = std.math.cast(u16, v);
     if (parsed.mode) |v| cli.mode = v;
-    if (parsed.evdev) |v| cli.evdev = v;
+    // --evdev accepts either a path (/dev/input/event5) or a logical
+    // device name (name:kanata) that survives reboot renumbering.
+    if (parsed.evdev) |v| {
+        if (std.mem.startsWith(u8, v, "name:")) {
+            cli.evdev_name = v["name:".len..];
+        } else {
+            cli.evdev = v;
+        }
+    }
     if (parsed.device) |v| cli.device = v;
     if (parsed.@"wav-path") |v| cli.wav_path = v;
     if (parsed.@"min-duration-ms") |v| cli.min_duration_ms = std.math.cast(u32, v);
@@ -80,6 +88,20 @@ test "cli parses min-duration and keep-wav flags" {
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqual(@as(u32, 800), got.min_duration_ms.?);
     try std.testing.expectEqual(true, got.keep_wav_on_error.?);
+}
+
+test "cli parses evdev path and name: prefix" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--evdev=name:kanata" };
+    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqualStrings("kanata", got.evdev_name.?);
+    try std.testing.expect(got.evdev == null);
+    const argv2 = [_][:0]const u8{ "zhisper", "--evdev=/dev/input/event5" };
+    const got2 = try parseCli(arena.allocator(), std.testing.io, &argv2);
+    try std.testing.expectEqualStrings("/dev/input/event5", got2.evdev.?);
+    try std.testing.expect(got2.evdev_name == null);
 }
 
 test "cli parses no-keep-wav as false" {

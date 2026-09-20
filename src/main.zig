@@ -204,7 +204,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer zhisper.inject.destroy();
-    zhisper.hotkey.setup(.{ .key_code = cfg.hotkey.key_code, .mode = mode, .evdev = cfg.hotkey.evdev }) catch |err| {
+    zhisper.hotkey.setup(.{ .key_code = cfg.hotkey.key_code, .mode = mode, .evdev = cfg.hotkey.evdev, .evdev_name = cfg.hotkey.evdev_name }) catch |err| {
         std.debug.print("zhisper: hotkey setup failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };

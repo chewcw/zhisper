@@ -28,6 +28,27 @@ fn pickEvdevPath(config_evdev: []const u8) ?[]const u8 {
     return null;
 }
 
+fn pickEvdevName(config_name: []const u8) ?[]const u8 {
+    if (config_name.len > 0) return config_name;
+    if (std.c.getenv("ZHISPER_EVDEV_NAME")) |raw| {
+        const name = std.mem.span(raw);
+        if (name.len > 0) return name;
+    }
+    return null;
+}
+
+/// Reads /sys/class/input/eventN/device/name into out, trimmed.
+/// Returns null when the device does not exist or cannot be read.
+fn eventDeviceName(event_idx: u32, out: []u8) ?[]const u8 {
+    var path_buf: [64]u8 = undefined;
+    const sys_path = std.fmt.bufPrint(&path_buf, "/sys/class/input/event{d}/device/name", .{event_idx}) catch return null;
+    const fd = posix.openat(posix.AT.FDCWD, sys_path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
+    defer closeFd(fd);
+    const n = std.os.linux.read(fd, out.ptr, out.len);
+    if (n == 0 or n > out.len) return null;
+    return std.mem.trim(u8, out[0..n], " \t\r\n\x00");
+}
+
 /// WHY this exists: /dev/input/event0, event1, ... are numbered randomly —
 /// event0 might be your mouse, a power button, or a webcam. We cannot guess.
 /// So we ask every candidate device "which keys can you press?" and only
@@ -87,12 +108,36 @@ fn openPath(path: []const u8) !?posix.fd_t {
 
 pub fn setup(config: HotkeyConfig) !void {
     destroy();
+    // Priority 1: explicit event path (config evdev or ZHISPER_EVDEV).
     if (pickEvdevPath(config.evdev)) |path| {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
+            std.debug.print("hotkey: using explicit evdev {s} (key={d})\n", .{ path, config.key_code });
             return;
         }
+        return error.DeviceNotFound;
+    }
+    // Priority 2: logical device name (config evdev_name or
+    // ZHISPER_EVDEV_NAME), e.g. "kanata". Event numbers move across
+    // reboots; names don't. Fails loudly instead of silently listening
+    // to the wrong keyboard.
+    if (pickEvdevName(config.evdev_name)) |want| {
+        var i: u32 = 0;
+        var name_buf: [32]u8 = undefined;
+        var devname_buf: [256]u8 = undefined;
+        while (i < 32) : (i += 1) {
+            const got = eventDeviceName(i, &devname_buf) orelse continue;
+            if (!std.mem.eql(u8, got, want)) continue;
+            const path = try std.fmt.bufPrint(&name_buf, "/dev/input/event{d}", .{i});
+            if (try openPath(path)) |fd| {
+                fd_evdev = fd;
+                active_cfg = config;
+                std.debug.print("hotkey: name match '{s}' -> {s} (key={d})\n", .{ want, path, config.key_code });
+                return;
+            }
+        }
+        std.debug.print("hotkey: no device named '{s}' found\n", .{want});
         return error.DeviceNotFound;
     }
     var i: u32 = 0;
@@ -107,6 +152,7 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
+            std.debug.print("hotkey: auto-scan picked {s} (key={d})\n", .{ path, config.key_code });
             return;
         }
     }
@@ -199,4 +245,18 @@ test "setup prefers config evdev over auto-scan" {
     // checks the picker, never touches hardware.
     try std.testing.expectEqualStrings("/dev/input/event5", pickEvdevPath("/dev/input/event5").?);
     try std.testing.expect(pickEvdevPath("") == null);
+}
+
+test "name picker prefers config over env default" {
+    // Pure picker, no hardware: config value wins when set.
+    try std.testing.expectEqualStrings("kanata", pickEvdevName("kanata").?);
+    // Empty config falls through to env or null; never touches hardware.
+    // (When ZHISPER_EVDEV_NAME is unset this is null; when set, that value.)
+    _ = pickEvdevName("");
+}
+
+test "eventDeviceName reads sysfs or skips without input subsystem" {
+    var buf: [256]u8 = undefined;
+    const got = eventDeviceName(0, &buf) orelse return error.SkipZigTest;
+    try std.testing.expect(got.len > 0);
 }
