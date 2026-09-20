@@ -10,6 +10,7 @@ pub const hotkey = @import("hotkey.zig");
 pub const hotkey_types = @import("hotkey_types.zig");
 pub const inject = @import("inject.zig");
 pub const config = @import("config.zig");
+pub const log = @import("log.zig");
 // Linux-only headers must never be analyzed on other targets.
 pub const linux = if (builtin.os.tag == .linux) @import("linux.zig") else struct {};
 
@@ -26,6 +27,7 @@ test {
     std.testing.refAllDecls(@import("inject_windows.zig"));
     std.testing.refAllDecls(@import("inject_macos.zig"));
     std.testing.refAllDecls(@import("config.zig"));
+    std.testing.refAllDecls(@import("log.zig"));
     if (builtin.os.tag == .linux) {
         std.testing.refAllDecls(@import("linux.zig"));
         std.testing.refAllDecls(@import("hotkey_linux.zig"));

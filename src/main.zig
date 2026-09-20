@@ -6,6 +6,11 @@ const zhisper = @import("zhisper");
 // into it yet (daemon-loop wiring is out of scope for the config change).
 const cli = @import("cli.zig");
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = zhisper.log.logFn,
+};
+
 test {
     std.testing.refAllDecls(@import("cli.zig"));
 }
@@ -150,17 +155,19 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
         q.mutex.unlock(io);
         const wav_path = path_buf[0..len];
         const t_cfg = buildTranscribeConfig(cfg, api_key);
+        const transcribe_log = std.log.scoped(.transcribe);
         const text = zhisper.transcribe.transcribeWithConfig(io, gpa, wav_path, t_cfg) catch |err| {
-            if (cfg.daemon.verbose) std.debug.print("transcribe failed: {s}\n", .{@errorName(err)});
+            transcribe_log.debug("transcribe failed: {s}", .{@errorName(err)});
             if (!cfg.daemon.keep_wav_on_error) std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
             continue;
         };
         defer gpa.free(text);
+        const inject_log = std.log.scoped(.inject);
         const n = zhisper.inject.typeText(text) catch |err| {
-            if (cfg.daemon.verbose) std.debug.print("inject failed: {s}\n", .{@errorName(err)});
+            inject_log.debug("inject failed: {s}", .{@errorName(err)});
             continue;
         };
-        if (cfg.daemon.verbose) std.debug.print("typed {d} chars\n", .{n});
+        inject_log.debug("typed {d} chars", .{n});
         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
     }
 }
@@ -168,6 +175,8 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
+    zhisper.log.init();
+    // CLI/config --verbose also enables stdout logs (env already checked in init).
 
     const argv = try init.minimal.args.toSlice(arena);
     const overrides = try cli.parseCli(arena, io, argv);
@@ -180,11 +189,13 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer zhisper.config.freeConfig(arena, cfg);
+    if (cfg.daemon.verbose) zhisper.log.setEnabled(true);
     try zhisper.config.validate(cfg);
 
     const mode = try modeFromString(cfg.hotkey.mode);
-    if (cfg.audio.device.len > 0 and cfg.daemon.verbose) {
-        std.debug.print("zhisper: device selection deferred, using default mic\n", .{});
+    const daemon_log = std.log.scoped(.daemon);
+    if (cfg.audio.device.len > 0) {
+        daemon_log.debug("device selection deferred, using default mic", .{});
     }
 
     // POSIX signals only: on Windows std.posix.Sigaction is void, so this
@@ -200,19 +211,19 @@ pub fn main(init: std.process.Init) !void {
 
     zhisper.audio.init(io, arena);
     zhisper.inject.setup(io) catch |err| {
-        std.debug.print("zhisper: inject setup failed: {s}\n", .{@errorName(err)});
+        std.log.err("inject setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     defer zhisper.inject.destroy();
     zhisper.hotkey.setup(.{ .key_code = cfg.hotkey.key_code, .mode = mode, .evdev = cfg.hotkey.evdev, .evdev_name = cfg.hotkey.evdev_name }) catch |err| {
-        std.debug.print("zhisper: hotkey setup failed: {s}\n", .{@errorName(err)});
+        std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
     defer zhisper.hotkey.destroy();
 
     const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
     const api_key = resolveApiKey(provider) orelse {
-        std.debug.print("zhisper: missing API key (set ZHISPER_API_KEY or provider key)\n", .{});
+        std.log.err("missing API key (set ZHISPER_API_KEY or provider key)", .{});
         std.process.exit(1);
     };
 
@@ -223,42 +234,45 @@ pub fn main(init: std.process.Init) !void {
     var start_ts: std.Io.Clock.Timestamp = undefined;
     var have_start = false;
     var wav_counter: u32 = 0;
-    std.debug.print("zhisper: listening (mode={s}, key={d})\n", .{ cfg.hotkey.mode, cfg.hotkey.key_code });
+    daemon_log.info("listening (mode={s}, key={d})", .{ cfg.hotkey.mode, cfg.hotkey.key_code });
 
     while (!stop_requested.load(.monotonic)) {
         const ev = zhisper.hotkey.pollEvent();
         if (ev) |e| {
+            daemon_log.debug("ev: {any}", .{e});
             const action = handleHotkeyEvent(&loop_state, e);
             switch (action) {
                 .ignore => {},
                 .start => {
+                    daemon_log.info("start recording...", .{});
                     start_ts = std.Io.Clock.Timestamp.now(io, .awake);
                     have_start = true;
                     zhisper.audio.setRecording(.start, "") catch |err| {
-                        if (cfg.daemon.verbose) std.debug.print("record start failed: {s}\n", .{@errorName(err)});
+                        daemon_log.debug("record start failed: {s}", .{@errorName(err)});
                         loop_state.recording = false;
                         have_start = false;
                     };
                 },
                 .stop => {
+                    daemon_log.info("stop recording", .{});
                     wav_counter += 1;
                     const wav_path = try uniqueWavPath(arena, cfg.daemon.wav_path, wav_counter);
                     defer arena.free(wav_path);
                     zhisper.audio.setRecording(.stop, wav_path) catch |err| {
-                        if (cfg.daemon.verbose) std.debug.print("record stop failed: {s}\n", .{@errorName(err)});
+                        daemon_log.debug("record stop failed: {s}", .{@errorName(err)});
                         continue;
                     };
                     const now_ts = std.Io.Clock.Timestamp.now(io, .awake);
                     const elapsed_ns: u64 = if (have_start) @intCast(start_ts.durationTo(now_ts).raw.nanoseconds) else 0;
                     have_start = false;
                     if (elapsed_ns < @as(u64, cfg.daemon.min_duration_ms) * 1_000_000) {
-                        if (cfg.daemon.verbose) std.debug.print("discarded short press ({d}ns)\n", .{elapsed_ns});
+                        daemon_log.debug("discarded short press ({d}ns)", .{elapsed_ns});
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
                         continue;
                     }
                     const stat = std.Io.Dir.cwd().statFile(io, wav_path, .{}) catch continue;
                     if (stat.size < 44 + minWavPayloadBytes(cfg.daemon.min_duration_ms)) {
-                        if (cfg.daemon.verbose) std.debug.print("discarded quiet clip ({d} bytes)\n", .{stat.size});
+                        daemon_log.debug("discarded quiet clip ({d} bytes)", .{stat.size});
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
                         continue;
                     }
@@ -269,7 +283,7 @@ pub fn main(init: std.process.Init) !void {
                         const old_path = old[0..queue.pending_len];
                         queue.mutex.unlock(io);
                         std.Io.Dir.cwd().deleteFile(io, old_path) catch {};
-                        if (cfg.daemon.verbose) std.debug.print("worker busy, dropped oldest clip\n", .{});
+                        daemon_log.debug("worker busy, dropped oldest clip", .{});
                         queue.mutex.lockUncancelable(io);
                     }
                     const copy_len = @min(wav_path.len, queue.pending_path.len);
@@ -337,4 +351,15 @@ test "toggle alternates on press and ignores release" {
     try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
     try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .pressed));
     try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
+}
+
+test "std_options routes through env-gated logFn" {
+    // Generic logFn values don't compare reliably with ==, so verify the
+    // exe root declares std_options with debug max level (proves our decl
+    // wins over the default) and that the gated module is wired.
+    try std.testing.expect(@hasDecl(@This(), "std_options"));
+    try std.testing.expectEqual(std.log.Level.debug, std.options.log_level);
+    @import("zhisper").log.setEnabled(false);
+    try std.testing.expect(@import("zhisper").log.shouldLog(.err));
+    try std.testing.expect(!@import("zhisper").log.shouldLog(.debug));
 }

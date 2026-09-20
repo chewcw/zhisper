@@ -108,12 +108,13 @@ fn openPath(path: []const u8) !?posix.fd_t {
 
 pub fn setup(config: HotkeyConfig) !void {
     destroy();
+    const log = std.log.scoped(.hotkey);
     // Priority 1: explicit event path (config evdev or ZHISPER_EVDEV).
     if (pickEvdevPath(config.evdev)) |path| {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            std.debug.print("hotkey: using explicit evdev {s} (key={d})\n", .{ path, config.key_code });
+            log.info("using explicit evdev {s} (key={d})", .{ path, config.key_code });
             return;
         }
         return error.DeviceNotFound;
@@ -133,11 +134,11 @@ pub fn setup(config: HotkeyConfig) !void {
             if (try openPath(path)) |fd| {
                 fd_evdev = fd;
                 active_cfg = config;
-                std.debug.print("hotkey: name match '{s}' -> {s} (key={d})\n", .{ want, path, config.key_code });
+                log.info("name match '{s}' -> {s} (key={d})", .{ want, path, config.key_code });
                 return;
             }
         }
-        std.debug.print("hotkey: no device named '{s}' found\n", .{want});
+        log.err("no device named '{s}' found", .{want});
         return error.DeviceNotFound;
     }
     var i: u32 = 0;
@@ -152,7 +153,7 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            std.debug.print("hotkey: auto-scan picked {s} (key={d})\n", .{ path, config.key_code });
+            log.info("auto-scan picked {s} (key={d})", .{ path, config.key_code });
             return;
         }
     }
@@ -161,6 +162,7 @@ pub fn setup(config: HotkeyConfig) !void {
 
 pub fn pollEvent() ?KeyEvent {
     if (fd_evdev < 0) return null;
+    const log = std.log.scoped(.hotkey);
     // struct input_event layout {timeval time; u16 type; u16 code; s32 value}
     // and value meanings (0 = release, 1 = press, 2 = autorepeat) per:
     // https://www.kernel.org/doc/html/latest/input/input.html (section 1.5)
@@ -170,6 +172,7 @@ pub fn pollEvent() ?KeyEvent {
         const n = std.os.linux.read(fd_evdev, bytes.ptr, bytes.len);
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
+        log.debug("ev code={d} value={d} (want {d})", .{ ev.code, ev.value, active_cfg.key_code });
         if (ev.code != active_cfg.key_code) continue;
         if (ev.value == 1) return .pressed;
         if (ev.value == 0) return .released;
