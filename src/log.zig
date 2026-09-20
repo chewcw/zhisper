@@ -49,6 +49,7 @@ pub fn logFn(
     defer w.interface.flush() catch {};
     w.interface.print("{s}({s}): ", .{ level.asText(), @tagName(scope) }) catch return;
     w.interface.print(format, args) catch return;
+    w.interface.print("\n", .{}) catch return;
 }
 
 test "disabled by default, err always logs" {
