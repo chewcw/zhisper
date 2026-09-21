@@ -15,6 +15,7 @@ const help_text =
     \\.      --mode=<str>          hold | toggle
     \\.      --evdev=<str>         Linux evdev path or name:DEVICE (empty = auto-scan)
     \\.      --device=<str>        mic device (empty = default)
+    \\.      --list-devices          list capture mics and exit
     \\.      --wav-path=<str>      wav output path
     \\.      --min-duration-ms=<uint>  discard recordings shorter than this (ms)
     \\.      --keep-wav            keep WAV on error (default keep)
@@ -50,6 +51,7 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
         }
     }
     if (parsed.device) |v| cli.device = v;
+    if (parsed.@"list-devices" > 0) cli.list_devices = true;
     if (parsed.@"wav-path") |v| cli.wav_path = v;
     if (parsed.@"min-duration-ms") |v| cli.min_duration_ms = std.math.cast(u32, v);
     if (parsed.@"keep-wav" > 0) cli.keep_wav_on_error = true;
@@ -111,4 +113,13 @@ test "cli parses no-keep-wav as false" {
     const argv = [_][:0]const u8{ "zhisper", "--no-keep-wav" };
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqual(false, got.keep_wav_on_error.?);
+}
+
+test "cli parses list-devices flag" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--list-devices" };
+    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqual(true, got.list_devices);
 }

@@ -166,6 +166,7 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
             continue;
         };
         inject_log.debug("typed {d} chars", .{n});
+
         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
     }
 }
@@ -190,11 +191,13 @@ pub fn main(init: std.process.Init) !void {
     if (cfg.daemon.verbose) zhisper.log.setEnabled(true);
     try zhisper.config.validate(cfg);
 
+    if (overrides.list_devices) {
+        try zhisper.audio.listCaptureDevices();
+        return;
+    }
+
     const mode = try modeFromString(cfg.hotkey.mode);
     const daemon_log = std.log.scoped(.daemon);
-    if (cfg.audio.device.len > 0) {
-        daemon_log.debug("device selection deferred, using default mic", .{});
-    }
 
     // POSIX signals only: on Windows std.posix.Sigaction is void, so this
     // block is pruned at comptime there (abrupt Ctrl-C instead of graceful).
@@ -207,7 +210,15 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    zhisper.audio.init(io, arena);
+    zhisper.audio.init(io, arena, cfg.audio.device) catch |err| {
+        if (err == error.DeviceNotFound) {
+            daemon_log.err("no mic matches \"{s}\" — available mics:", .{cfg.audio.device});
+            zhisper.audio.listCaptureDevices() catch {};
+        } else {
+            daemon_log.err("audio init failed: {s}", .{@errorName(err)});
+        }
+        std.process.exit(1);
+    };
     zhisper.inject.setup(io) catch |err| {
         std.log.err("inject setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);

@@ -51,6 +51,7 @@ pub const CliOverrides = struct {
     wav_path: ?[]const u8 = null,
     keep_wav_on_error: ?bool = null,
     verbose: ?bool = null,
+    list_devices: bool = false,
 };
 
 pub fn parseFileConfig(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Config {
