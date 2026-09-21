@@ -15,6 +15,31 @@ var samples: std.ArrayList(i16) = .empty;
 var spin: std.atomic.Mutex = .unlocked;
 var backend: Backend = .{ .open = maOpen, .close = maClose };
 
+fn containsCaseInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return false;
+    if (needle.len > haystack.len) return false;
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var ok = true;
+        for (needle, 0..) |nc, j| {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(nc)) {
+                ok = false;
+                break;
+            }
+        }
+        if (ok) return true;
+    }
+    return false;
+}
+
+fn findMatchIndex(names: []const []const u8, filter: []const u8) ?usize {
+    if (filter.len == 0) return null;
+    for (names, 0..) |n, idx| {
+        if (containsCaseInsensitive(n, filter)) return idx;
+    }
+    return null;
+}
+
 const ma = @cImport(@cInclude("miniaudio.h"));
 
 var device: ma.ma_device = undefined;
@@ -216,4 +241,13 @@ test "live mic smoke test (opt-in)" {
     try r.interface.readSliceAll(&got);
     try std.testing.expectEqualSlices(u8, "RIFF", got[0..4]);
     try std.testing.expectEqualSlices(u8, "WAVE", got[8..12]);
+}
+
+test "findMatchIndex matches substring case-insensitively" {
+    const names = [_][]const u8{ "Built-in Microphone", "USB Mic Pro" };
+    try std.testing.expectEqual(@as(?usize, 1), findMatchIndex(&names, "usb"));
+    try std.testing.expectEqual(@as(?usize, 1), findMatchIndex(&names, "USB"));
+    try std.testing.expectEqual(@as(?usize, 0), findMatchIndex(&names, "built"));
+    try std.testing.expectEqual(@as(?usize, null), findMatchIndex(&names, ""));
+    try std.testing.expectEqual(@as(?usize, null), findMatchIndex(&names, "nope"));
 }
