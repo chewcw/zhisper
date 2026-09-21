@@ -44,6 +44,8 @@ const ma = @cImport(@cInclude("miniaudio.h"));
 
 var device: ma.ma_device = undefined;
 var device_live: bool = false;
+var selected_id: ma.ma_device_id = undefined;
+var has_selected: bool = false;
 
 fn dataCallback(p_device: ?*ma.ma_device, p_output: ?*anyopaque, p_input: ?*const anyopaque, frame_count: ma.ma_uint32) callconv(.c) void {
     _ = p_device;
@@ -65,6 +67,7 @@ fn maOpen() anyerror!void {
     config.sampleRate = 16000;
     config.dataCallback = dataCallback;
     config.pUserData = null;
+    if (has_selected) config.capture.pDeviceID = &selected_id;
     const r = ma.ma_device_init(null, &config, &device);
     if (r != ma.MA_SUCCESS) return error.DeviceInitFailed;
     errdefer ma.ma_device_uninit(&device);
@@ -82,10 +85,62 @@ fn maClose() anyerror!void {
 fn stubOpen() anyerror!void {}
 fn stubClose() anyerror!void {}
 
-/// Call once before setRecording (e.g. from main or tests).
-pub fn init(io: std.Io, gpa: std.mem.Allocator) void {
+/// Call once before setRecording. Empty filter = default mic.
+/// Non-empty filter enumerates capture devices once via a throwaway
+/// ma_context, picks the first case-insensitive substring match, copies
+/// the ma_device_id struct (device init copies it internally, so the
+/// temp context can be torn down immediately). No match -> error.DeviceNotFound.
+pub fn init(io: std.Io, gpa: std.mem.Allocator, device_filter: []const u8) !void {
     io_store = io;
     gpa_store = gpa;
+    has_selected = false;
+    if (device_filter.len == 0) return;
+    var ctx: ma.ma_context = undefined;
+    if (ma.ma_context_init(null, 0, null, &ctx) != ma.MA_SUCCESS) return error.DeviceInitFailed;
+    defer _ = ma.ma_context_uninit(&ctx);
+    var p_playback: [*c]ma.ma_device_info = null;
+    var playback_count: ma.ma_uint32 = 0;
+    var p_capture: [*c]ma.ma_device_info = null;
+    var capture_count: ma.ma_uint32 = 0;
+    if (ma.ma_context_get_devices(&ctx, &p_playback, &playback_count, &p_capture, &capture_count) != ma.MA_SUCCESS) return error.DeviceInitFailed;
+    const n: usize = @intCast(capture_count);
+    const infos = if (p_capture) |p| p[0..n] else &[_]ma.ma_device_info{};
+    var idx: ?usize = null;
+    for (infos, 0..) |info, i| {
+        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+        if (containsCaseInsensitive(name, device_filter)) {
+            idx = i;
+            break;
+        }
+    }
+    const hit = idx orelse return error.DeviceNotFound;
+    selected_id = infos[hit].id;
+    has_selected = true;
+    const picked = std.mem.span(@as([*:0]const u8, @ptrCast(&infos[hit].name)));
+    std.log.scoped(.daemon).info("using mic \"{s}\" for \"{s}\"", .{ picked, device_filter });
+}
+
+/// Prints capture device names for --list-devices and error paths.
+pub fn listCaptureDevices() !void {
+    const log = std.log.scoped(.daemon);
+    var ctx: ma.ma_context = undefined;
+    if (ma.ma_context_init(null, 0, null, &ctx) != ma.MA_SUCCESS) return error.DeviceInitFailed;
+    defer _ = ma.ma_context_uninit(&ctx);
+    var p_playback: [*c]ma.ma_device_info = null;
+    var playback_count: ma.ma_uint32 = 0;
+    var p_capture: [*c]ma.ma_device_info = null;
+    var capture_count: ma.ma_uint32 = 0;
+    if (ma.ma_context_get_devices(&ctx, &p_playback, &playback_count, &p_capture, &capture_count) != ma.MA_SUCCESS) return error.DeviceInitFailed;
+    const n: usize = @intCast(capture_count);
+    const infos = if (p_capture) |p| p[0..n] else &[_]ma.ma_device_info{};
+    if (infos.len == 0) {
+        log.info("no capture devices found", .{});
+        return;
+    }
+    for (infos) |info| {
+        const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
+        log.info("capture: {s}", .{name});
+    }
 }
 
 fn lockSpin() void {
@@ -160,7 +215,7 @@ fn appendStubSamplesForTest(data: []const i16) !void {
 }
 
 test "mode 0 and 3 are silent no-ops" {
-    init(std.testing.io, std.testing.allocator);
+    try init(std.testing.io, std.testing.allocator, "");
     const prev_backend = backend;
     defer backend = prev_backend;
     backend = .{ .open = stubOpen, .close = stubClose };
@@ -172,7 +227,7 @@ test "mode 0 and 3 are silent no-ops" {
 }
 
 test "double start errors, stop-while-idle errors" {
-    init(std.testing.io, std.testing.allocator);
+    try init(std.testing.io, std.testing.allocator, "");
     const prev_backend = backend;
     defer backend = prev_backend;
     backend = .{ .open = stubOpen, .close = stubClose };
@@ -191,7 +246,7 @@ test "double start errors, stop-while-idle errors" {
 
 test "stop writes injected samples as parseable wav" {
     const io = std.testing.io;
-    init(io, std.testing.allocator);
+    try init(io, std.testing.allocator, "");
     const prev_backend = backend;
     defer backend = prev_backend;
     backend = .{ .open = stubOpen, .close = stubClose };
@@ -221,7 +276,7 @@ test "stop writes injected samples as parseable wav" {
 test "live mic smoke test (opt-in)" {
     if (std.c.getenv("RECORD_LIVE") == null) return error.SkipZigTest;
     const io = std.testing.io;
-    init(io, std.testing.allocator);
+    try init(io, std.testing.allocator, "");
     defer {
         samples.deinit(std.testing.allocator);
         samples = .empty;
@@ -250,4 +305,9 @@ test "findMatchIndex matches substring case-insensitively" {
     try std.testing.expectEqual(@as(?usize, 0), findMatchIndex(&names, "built"));
     try std.testing.expectEqual(@as(?usize, null), findMatchIndex(&names, ""));
     try std.testing.expectEqual(@as(?usize, null), findMatchIndex(&names, "nope"));
+}
+
+test "empty filter keeps default device" {
+    try init(std.testing.io, std.testing.allocator, "");
+    try std.testing.expect(!has_selected);
 }
