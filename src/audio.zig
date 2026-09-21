@@ -120,9 +120,10 @@ pub fn init(io: std.Io, gpa: std.mem.Allocator, device_filter: []const u8) !void
     std.log.scoped(.daemon).info("using mic \"{s}\" for \"{s}\"", .{ picked, device_filter });
 }
 
-/// Prints capture device names for --list-devices and error paths.
-pub fn listCaptureDevices() !void {
-    const log = std.log.scoped(.daemon);
+/// Prints capture device names, one per line, to stdout — always visible,
+/// never gated by the debug log flag. Used for --list-devices (command
+/// output like --help) and for the fail-fast error path.
+pub fn listCaptureDevices(io: std.Io) !void {
     var ctx: ma.ma_context = undefined;
     if (ma.ma_context_init(null, 0, null, &ctx) != ma.MA_SUCCESS) return error.DeviceInitFailed;
     defer _ = ma.ma_context_uninit(&ctx);
@@ -133,13 +134,16 @@ pub fn listCaptureDevices() !void {
     if (ma.ma_context_get_devices(&ctx, &p_playback, &playback_count, &p_capture, &capture_count) != ma.MA_SUCCESS) return error.DeviceInitFailed;
     const n: usize = @intCast(capture_count);
     const infos = if (p_capture) |p| p[0..n] else &[_]ma.ma_device_info{};
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    defer w.interface.flush() catch {};
     if (infos.len == 0) {
-        log.info("no capture devices found", .{});
+        try w.interface.print("no capture devices found\n", .{});
         return;
     }
     for (infos) |info| {
         const name = std.mem.span(@as([*:0]const u8, @ptrCast(&info.name)));
-        log.info("capture: {s}", .{name});
+        try w.interface.print("{s}\n", .{name});
     }
 }
 

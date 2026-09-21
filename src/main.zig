@@ -192,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
     try zhisper.config.validate(cfg);
 
     if (overrides.list_devices) {
-        try zhisper.audio.listCaptureDevices();
+        try zhisper.audio.listCaptureDevices(io);
         return;
     }
 
@@ -213,7 +213,7 @@ pub fn main(init: std.process.Init) !void {
     zhisper.audio.init(io, arena, cfg.audio.device) catch |err| {
         if (err == error.DeviceNotFound) {
             daemon_log.err("no mic matches \"{s}\" — available mics:", .{cfg.audio.device});
-            zhisper.audio.listCaptureDevices() catch {};
+            zhisper.audio.listCaptureDevices(io) catch {};
         } else {
             daemon_log.err("audio init failed: {s}", .{@errorName(err)});
         }
