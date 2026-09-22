@@ -109,6 +109,14 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
     }
 }
 
+/// Overlay tint derivation (main thread only). Recording wins over a
+/// queued clip; the worker thread never touches the overlay.
+fn overlayStateFor(recording: bool, has_pending: bool) zhisper.overlay.State {
+    if (recording) return .recording;
+    if (has_pending) return .working;
+    return .idle;
+}
+
 var stop_requested: std.atomic.Value(bool) = .init(false);
 
 fn onSignal(_: std.posix.SIG) callconv(.c) void {
@@ -230,6 +238,37 @@ pub fn main(init: std.process.Init) !void {
     };
     defer zhisper.hotkey.destroy();
 
+    // Overlay is best-effort: any failure degrades to hotkey-only.
+    var overlay_live = false;
+    if (zhisper.overlay.setup(.{})) |_| {
+        overlay_live = true;
+    } else |err| {
+        daemon_log.debug("overlay setup failed (headless): {s}", .{@errorName(err)});
+    }
+    if (overlay_live) {
+        zhisper.overlay.show() catch |err| {
+            daemon_log.debug("overlay show failed: {s}", .{@errorName(err)});
+            zhisper.overlay.destroy();
+            overlay_live = false;
+        };
+    }
+    defer if (overlay_live) {
+        zhisper.overlay.destroy();
+    };
+    const overlay_pos_path = if (overlay_live) zhisper.overlay.overlayPosPath(arena) catch null else null;
+    // Enumerate once at startup (primary first); unplugged-monitor saves
+    // fall back to the default corner inside loadOverlayPos. The arena
+    // owns the list for the life of the daemon.
+    var overlay_no_displays: [0]zhisper.overlay_types.Display = .{};
+    var overlay_displays: []zhisper.overlay_types.Display = overlay_no_displays[0..];
+    if (overlay_live) {
+        overlay_displays = zhisper.overlay.displayList(arena) catch overlay_no_displays[0..];
+        if (overlay_pos_path) |pp| {
+            zhisper.overlay.move(zhisper.overlay.loadOverlayPos(io, arena, pp, overlay_displays));
+        }
+    }
+    var overlay_state: zhisper.overlay.State = .idle;
+
     const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
     const api_key = resolveApiKey(provider) orelse {
         std.log.err("missing API key (set ZHISPER_API_KEY or provider key)", .{});
@@ -303,7 +342,35 @@ pub fn main(init: std.process.Init) !void {
                 },
             }
         } else {
-            try io.sleep(.fromMilliseconds(5), .awake);
+            if (overlay_live) {
+                if (zhisper.overlay.pollEvent()) |oev| {
+                    switch (oev) {
+                        .drag_start, .drag_moved => {},
+                        .drag_end => |p| {
+                            if (overlay_pos_path) |pp| {
+                                zhisper.overlay.saveOverlayPos(io, pp, p) catch |err| {
+                                    daemon_log.debug("overlay pos save failed: {s}", .{@errorName(err)});
+                                };
+                            }
+                        },
+                    }
+                } else {
+                    try io.sleep(.fromMilliseconds(5), .awake);
+                }
+            } else {
+                try io.sleep(.fromMilliseconds(5), .awake);
+            }
+        }
+        // One-way state push on change only (never from the worker thread).
+        if (overlay_live) {
+            queue.mutex.lockUncancelable(io);
+            const pending = queue.has_pending;
+            queue.mutex.unlock(io);
+            const cur = overlayStateFor(loop_state.recording, pending);
+            if (cur != overlay_state) {
+                overlay_state = cur;
+                zhisper.overlay.setState(cur);
+            }
         }
     }
 
@@ -360,6 +427,13 @@ test "toggle alternates on press and ignores release" {
     try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
     try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .pressed));
     try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
+}
+
+test "overlay state derives from recording then pending" {
+    try std.testing.expectEqual(zhisper.overlay.State.recording, overlayStateFor(true, false));
+    try std.testing.expectEqual(zhisper.overlay.State.recording, overlayStateFor(true, true));
+    try std.testing.expectEqual(zhisper.overlay.State.working, overlayStateFor(false, true));
+    try std.testing.expectEqual(zhisper.overlay.State.idle, overlayStateFor(false, false));
 }
 
 test "std_options routes through env-gated logFn" {
