@@ -47,7 +47,12 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFile(.{ .file = b.path("src/miniaudio.c") });
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     mod.addImport("toml", toml_dep.module("toml"));
-
+    // SDL3 (vendored C sources, built per target). Imported on `mod` so the
+    // overlay backend resolves in library builds too; under `is_test` the
+    // backend is pruned before analysis, so test binaries need no display
+    // (the C sources still compile once per target — first build is slow).
+    const sdl_dep = b.dependency("sdl3", .{ .target = target, .optimize = optimize });
+    mod.addImport("sdl3", sdl_dep.module("sdl3"));
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -93,6 +98,8 @@ pub fn build(b: *std.Build) void {
     });
     const argz_dep = b.dependency("argz", .{ .target = target, .optimize = optimize });
     exe.root_module.addImport("argz", argz_dep.module("argz"));
+    // NOTE: no sdl3 import here — the exe resolves SDL through `mod`
+    // (see above), which is where the overlay backend lives.
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
