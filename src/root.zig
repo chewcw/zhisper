@@ -22,6 +22,7 @@ test {
     std.testing.refAllDecls(@import("inject.zig"));
     std.testing.refAllDecls(@import("inject_stub.zig"));
     std.testing.refAllDecls(@import("overlay_types.zig"));
+    std.testing.refAllDecls(@import("overlay_stub.zig"));
     std.testing.refAllDecls(@import("hotkey_windows.zig"));
     std.testing.refAllDecls(@import("hotkey_macos.zig"));
     std.testing.refAllDecls(@import("inject_windows.zig"));
