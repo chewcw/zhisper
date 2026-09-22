@@ -114,7 +114,7 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("using explicit evdev {s} (key={d})", .{ path, config.key_code });
+            log.info("using explicit evdev {s} (key={d}, cancel={d})", .{ path, config.key_code, config.cancel_key_code });
             return;
         }
         return error.DeviceNotFound;
@@ -134,7 +134,7 @@ pub fn setup(config: HotkeyConfig) !void {
             if (try openPath(path)) |fd| {
                 fd_evdev = fd;
                 active_cfg = config;
-                log.info("name match '{s}' -> {s} (key={d})", .{ want, path, config.key_code });
+                log.info("name match '{s}' -> {s} (key={d}, cancel={d})", .{ want, path, config.key_code, config.cancel_key_code });
                 return;
             }
         }
@@ -153,7 +153,7 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("auto-scan picked {s} (key={d})", .{ path, config.key_code });
+            log.info("auto-scan picked {s} (key={d}, cancel={d})", .{ path, config.key_code, config.cancel_key_code });
             return;
         }
     }
@@ -173,10 +173,16 @@ pub fn pollEvent() ?KeyEvent {
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
         log.debug("ev code={d} value={d} (want {d})", .{ ev.code, ev.value, active_cfg.key_code });
-        if (ev.code != active_cfg.key_code) continue;
-        if (ev.value == 1) return .pressed;
-        if (ev.value == 0) return .released;
-        // value == 2 is auto-repeat: ignore.
+        // Hotkey first so a misconfigured cancel == hotkey degrades to hotkey.
+        if (ev.code == active_cfg.key_code) {
+            if (ev.value == 1) return .hotkey_pressed;
+            if (ev.value == 0) return .hotkey_released;
+            continue; // value == 2 is auto-repeat: ignore.
+        }
+        if (active_cfg.cancel_key_code != 0 and ev.code == active_cfg.cancel_key_code) {
+            if (ev.value == 1) return .cancel_pressed;
+            continue; // cancel release + autorepeat swallowed.
+        }
     }
 }
 
@@ -229,9 +235,53 @@ test "pollEvent decodes press, skips repeat, decodes release" {
     try writeTestEvent(fds[1], c.EV_KEY, 31, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 30, 2);
     try writeTestEvent(fds[1], c.EV_KEY, 30, 1);
-    try std.testing.expectEqual(KeyEvent.pressed, pollEvent().?);
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
     try writeTestEvent(fds[1], c.EV_KEY, 30, 0);
-    try std.testing.expectEqual(KeyEvent.released, pollEvent().?);
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "pollEvent decodes cancel press, swallows cancel release and repeat" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .cancel_key_code = 46 });
+    // unrelated code skipped
+    try writeTestEvent(fds[1], c.EV_KEY, 31, 1);
+    // cancel autorepeat swallowed
+    try writeTestEvent(fds[1], c.EV_KEY, 46, 2);
+    // cancel press decodes
+    try writeTestEvent(fds[1], c.EV_KEY, 46, 1);
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+    // cancel release swallowed -> null (nonblocking empty pipe)
+    try writeTestEvent(fds[1], c.EV_KEY, 46, 0);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "cancel disabled with 0 never fires" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .cancel_key_code = 0 });
+    try writeTestEvent(fds[1], c.EV_KEY, 46, 1);
     try std.testing.expect(pollEvent() == null);
 }
 
