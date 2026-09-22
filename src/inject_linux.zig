@@ -25,6 +25,11 @@ const product_id = 0x5678;
 pub const device_name = "zhisper";
 pub const expected_key_count: usize = 58;
 
+// Hold/gap pacing between press and release so uinput consumers don't
+// coalesce rapid pairs. ~10ms per char total.
+const press_hold_us: u64 = 8000;
+const release_gap_us: u64 = 2000;
+
 var fd_uinput: posix.fd_t = -1;
 
 pub fn buildUinputSetup() UinputSetup {
@@ -226,22 +231,27 @@ fn keyForChar(ch: u8) ?KeyPress {
     };
 }
 
-fn tapCode(code: u16, shift: bool) !void {
+fn tapCode(code: u16, shift: bool, io: std.Io) !void {
     if (shift) try emitKey(c.KEY_LEFTSHIFT, .pressed);
     errdefer if (shift) emitKey(c.KEY_LEFTSHIFT, .released) catch {};
     try emitKey(code, .pressed);
+    // Pacing for uinput consumers (libinput/compositors) that coalesce or
+    // drop back-to-back press/release pairs without a small hold/gap.
+    // Best-effort: sleep interruption must not abort typing mid-word.
+    io.sleep(.fromMicroseconds(press_hold_us), .awake) catch {};
     try emitKey(code, .released);
+    io.sleep(.fromMicroseconds(release_gap_us), .awake) catch {};
     if (shift) try emitKey(c.KEY_LEFTSHIFT, .released);
 }
 
 /// Types UTF-8 ASCII text via the uinput device. US layout. Returns
 /// characters injected; stops at the first unmapped byte.
-pub fn typeText(text: []const u8) !usize {
+pub fn typeText(text: []const u8, io: std.Io) !usize {
     if (fd_uinput < 0) return error.NotSetup;
     var count: usize = 0;
     for (text) |ch| {
         const kp = keyForChar(ch) orelse return error.UnsupportedCharacter;
-        try tapCode(kp.code, kp.shift);
+        try tapCode(kp.code, kp.shift, io);
         count += 1;
     }
     return count;
@@ -300,10 +310,10 @@ test "allKeyCodes count, coverage, no duplicates" {
 
     // Spot-check representatives from each group.
     const wants = [_]u16{
-        @intCast(c.KEY_Q),  @intCast(c.KEY_P),
-        @intCast(c.KEY_A),  @intCast(c.KEY_L),
-        @intCast(c.KEY_Z),  @intCast(c.KEY_M),
-        @intCast(c.KEY_1),  @intCast(c.KEY_0),
+        @intCast(c.KEY_Q),         @intCast(c.KEY_P),
+        @intCast(c.KEY_A),         @intCast(c.KEY_L),
+        @intCast(c.KEY_Z),         @intCast(c.KEY_M),
+        @intCast(c.KEY_1),         @intCast(c.KEY_0),
         @intCast(c.KEY_SPACE),     @intCast(c.KEY_ENTER),
         @intCast(c.KEY_BACKSPACE), @intCast(c.KEY_TAB),
         @intCast(c.KEY_LEFTCTRL),  @intCast(c.KEY_RIGHTCTRL),
@@ -404,5 +414,5 @@ test "typeText without setup returns NotSetup" {
     const saved = fd_uinput;
     fd_uinput = -1;
     defer fd_uinput = saved;
-    try std.testing.expectError(error.NotSetup, typeText("hi"));
+    try std.testing.expectError(error.NotSetup, typeText("hi", std.testing.io));
 }

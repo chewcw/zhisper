@@ -4,7 +4,7 @@ pub fn setup(_: std.Io) !void {
     return error.UnsupportedOs;
 }
 
-pub fn typeText(_: []const u8) !usize {
+pub fn typeText(_: []const u8, _: std.Io) !usize {
     return error.UnsupportedOs;
 }
 

@@ -161,7 +161,7 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
         };
         defer gpa.free(text);
         const inject_log = std.log.scoped(.inject);
-        const n = zhisper.inject.typeText(text) catch |err| {
+        const n = zhisper.inject.typeText(text, io) catch |err| {
             inject_log.debug("inject failed: {s}", .{@errorName(err)});
             continue;
         };

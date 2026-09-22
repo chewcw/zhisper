@@ -11,7 +11,7 @@ pub fn setup(_: std.Io) !void {
     reset();
 }
 
-pub fn typeText(text: []const u8) !usize {
+pub fn typeText(text: []const u8, _: std.Io) !usize {
     if (len + text.len > buf.len) return error.OutOfMemory;
     @memcpy(buf[len .. len + text.len], text);
     len += text.len;
@@ -29,7 +29,7 @@ pub fn takeText() []const u8 {
 test "stub records typed text including multibyte" {
     reset();
     defer reset();
-    const n = try typeText("héllo");
+    const n = try typeText("héllo", std.testing.io);
     try std.testing.expectEqual(@as(usize, 6), n);
     try std.testing.expectEqualStrings("héllo", takeText());
 }

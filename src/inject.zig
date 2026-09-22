@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const impl = if (builtin.is_test)
     @import("inject_stub.zig")
 else switch (builtin.os.tag) {
-    .linux => @import("linux.zig"),
+    .linux => @import("inject_linux.zig"),
     .windows => @import("inject_windows.zig"),
     .macos => @import("inject_macos.zig"),
     else => @compileError("inject: unsupported OS"),
@@ -14,8 +14,8 @@ pub fn setup(io: std.Io) !void {
     return impl.setup(io);
 }
 
-pub fn typeText(text: []const u8) !usize {
-    return impl.typeText(text);
+pub fn typeText(text: []const u8, io: std.Io) !usize {
+    return impl.typeText(text, io);
 }
 
 pub fn destroy() void {
@@ -27,7 +27,7 @@ test "facade types through the stub" {
     stub.reset();
     defer stub.reset();
     try setup(std.testing.io);
-    const n = try typeText("hi");
+    const n = try typeText("hi", std.testing.io);
     try std.testing.expectEqual(@as(usize, 2), n);
     try std.testing.expectEqualStrings("hi", stub.takeText());
     destroy();
