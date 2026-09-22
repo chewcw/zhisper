@@ -169,16 +169,24 @@ pub fn shutdown() void {
     closeDevice();
 }
 
-pub const RecordingMode = enum(u2) {
-    silent = 0,
-    start = 1,
-    stop = 2,
-    no_op = 3,
+pub const RecordingMode = enum {
+    silent,
+    start,
+    stop,
+    no_op,
+    cancel,
 };
 
 pub fn setRecording(mode: RecordingMode, path: []const u8) !void {
     switch (mode) {
         .silent, .no_op => return,
+        .cancel => {
+            if (!capturing.load(.acquire)) return error.NotRecording;
+            capturing.store(false, .release);
+            lockSpin();
+            samples.clearRetainingCapacity();
+            spin.unlock();
+        },
         .start => {
             if (capturing.load(.acquire)) return error.AlreadyRecording;
             try ensureOpen();
@@ -216,6 +224,27 @@ fn appendStubSamplesForTest(data: []const i16) !void {
     lockSpin();
     defer spin.unlock();
     try samples.appendSlice(gpa_store, data);
+}
+
+test "cancel discards samples without writing a file" {
+    const io = std.testing.io;
+    try init(io, std.testing.allocator, "");
+    const prev_backend = backend;
+    defer backend = prev_backend;
+    backend = .{ .open = stubOpen, .close = stubClose };
+    defer {
+        samples.deinit(std.testing.allocator);
+        samples = .empty;
+    }
+    capturing.store(false, .monotonic);
+    samples.clearRetainingCapacity();
+    try setRecording(.start, "ignored.wav");
+    try appendStubSamplesForTest(&[_]i16{ 0, 1000, -1000 });
+    try setRecording(.cancel, "");
+    try std.testing.expect(!capturing.load(.acquire));
+    const stat = std.Io.Dir.cwd().statFile(io, "cancel-should-not-exist.wav", .{});
+    try std.testing.expectError(error.FileNotFound, stat);
+    try std.testing.expectError(error.NotRecording, setRecording(.cancel, ""));
 }
 
 test "mode 0 and 3 are silent no-ops" {
