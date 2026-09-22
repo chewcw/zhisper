@@ -135,7 +135,7 @@ fn ioctlNoArg(fd: posix.fd_t, request: c_ulong) !void {
 /// Timestamps are left zeroed — the kernel ignores them for uinput writes.
 pub fn emitKey(code: u16, action: KeyEvent) !void {
     if (fd_uinput < 0) return error.NotSetup;
-    const value: u32 = if (action == .pressed) 1 else 0;
+    const value: u32 = if (action == .hotkey_pressed) 1 else 0;
     const ev_key = c.struct_input_event{
         .type = c.EV_KEY,
         .code = @intCast(code),
@@ -155,8 +155,8 @@ pub fn emitKey(code: u16, action: KeyEvent) !void {
 }
 
 pub fn tapKey(code: u16) !void {
-    try emitKey(code, .pressed);
-    try emitKey(code, .released);
+    try emitKey(code, .hotkey_pressed);
+    try emitKey(code, .hotkey_released);
 }
 
 const KeyPress = struct { code: u16, shift: bool };
@@ -232,16 +232,16 @@ fn keyForChar(ch: u8) ?KeyPress {
 }
 
 fn tapCode(code: u16, shift: bool, io: std.Io) !void {
-    if (shift) try emitKey(c.KEY_LEFTSHIFT, .pressed);
-    errdefer if (shift) emitKey(c.KEY_LEFTSHIFT, .released) catch {};
-    try emitKey(code, .pressed);
+    if (shift) try emitKey(c.KEY_LEFTSHIFT, .hotkey_pressed);
+    errdefer if (shift) emitKey(c.KEY_LEFTSHIFT, .hotkey_released) catch {};
+    try emitKey(code, .hotkey_pressed);
     // Pacing for uinput consumers (libinput/compositors) that coalesce or
     // drop back-to-back press/release pairs without a small hold/gap.
     // Best-effort: sleep interruption must not abort typing mid-word.
     io.sleep(.fromMicroseconds(press_hold_us), .awake) catch {};
-    try emitKey(code, .released);
+    try emitKey(code, .hotkey_released);
     io.sleep(.fromMicroseconds(release_gap_us), .awake) catch {};
-    if (shift) try emitKey(c.KEY_LEFTSHIFT, .released);
+    if (shift) try emitKey(c.KEY_LEFTSHIFT, .hotkey_released);
 }
 
 /// Types UTF-8 ASCII text via the uinput device. US layout. Returns
@@ -384,8 +384,8 @@ test "emitKey without setup returns NotSetup" {
     const saved = fd_uinput;
     fd_uinput = -1;
     defer fd_uinput = saved;
-    try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .pressed));
-    try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .released));
+    try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .hotkey_pressed));
+    try std.testing.expectError(error.NotSetup, emitKey(c.KEY_ENTER, .hotkey_released));
 }
 
 test "tapKey without setup returns NotSetup" {

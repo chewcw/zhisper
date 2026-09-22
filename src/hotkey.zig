@@ -32,10 +32,12 @@ test "facade replays stub events in order" {
     stub.reset();
     defer stub.reset();
     try setup(.{ .key_code = 30, .mode = .hold });
-    stub.pushTestEvent(.pressed);
-    stub.pushTestEvent(.released);
-    try std.testing.expectEqual(KeyEvent.pressed, pollEvent().?);
-    try std.testing.expectEqual(KeyEvent.released, pollEvent().?);
+    stub.pushTestEvent(.hotkey_pressed);
+    stub.pushTestEvent(.hotkey_released);
+    stub.pushTestEvent(.cancel_pressed);
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
     try std.testing.expect(pollEvent() == null);
     destroy();
 }

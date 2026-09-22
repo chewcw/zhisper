@@ -31,12 +31,14 @@ pub fn destroy() void {
     reset();
 }
 
-test "stub replays queued press and release then null" {
+test "stub replays hotkey press, release, and cancel then null" {
     reset();
     defer reset();
-    pushTestEvent(.pressed);
-    pushTestEvent(.released);
-    try std.testing.expectEqual(types.KeyEvent.pressed, pollEvent().?);
-    try std.testing.expectEqual(types.KeyEvent.released, pollEvent().?);
+    pushTestEvent(.hotkey_pressed);
+    pushTestEvent(.hotkey_released);
+    pushTestEvent(.cancel_pressed);
+    try std.testing.expectEqual(types.KeyEvent.hotkey_pressed, pollEvent().?);
+    try std.testing.expectEqual(types.KeyEvent.hotkey_released, pollEvent().?);
+    try std.testing.expectEqual(types.KeyEvent.cancel_pressed, pollEvent().?);
     try std.testing.expect(pollEvent() == null);
 }

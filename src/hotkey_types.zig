@@ -3,11 +3,18 @@ const std = @import("std");
 /// Single vocabulary for both directions: the hotkey listener reports a
 /// KeyEvent, the typer consumes one. Pure Zig, no OS headers — safe on all
 /// targets, including test builds.
-pub const KeyEvent = enum { pressed, released };
+pub const KeyEvent = enum { hotkey_pressed, hotkey_released, cancel_pressed };
 pub const Mode = enum { hold, toggle };
-pub const HotkeyConfig = struct { key_code: u16, mode: Mode = .hold, evdev: []const u8 = "", evdev_name: []const u8 = "" };
+pub const HotkeyConfig = struct { key_code: u16, mode: Mode = .hold, evdev: []const u8 = "", evdev_name: []const u8 = "", cancel_key_code: u16 = 46 };
 
 test "default mode is hold" {
     const cfg = HotkeyConfig{ .key_code = 16 };
     try std.testing.expectEqual(Mode.hold, cfg.mode);
+}
+
+test "cancel key defaults to KEY_C and is disableable with 0" {
+    const cfg = HotkeyConfig{ .key_code = 16 };
+    try std.testing.expectEqual(@as(u16, 46), cfg.cancel_key_code);
+    const off = HotkeyConfig{ .key_code = 16, .cancel_key_code = 0 };
+    try std.testing.expectEqual(@as(u16, 0), off.cancel_key_code);
 }
