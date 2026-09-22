@@ -72,7 +72,7 @@ fn resolveConfigPath(gpa: std.mem.Allocator) ![]u8 {
     return try std.fmt.allocPrint(gpa, "{s}/.config/zhisper/config.toml", .{home});
 }
 
-const Action = enum { start, stop, ignore };
+const Action = enum { start, stop, ignore, cancel };
 
 const LoopState = struct {
     mode: zhisper.hotkey.Mode,
@@ -81,22 +81,28 @@ const LoopState = struct {
 };
 
 fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
+    if (ev == .cancel_pressed) {
+        if (!s.recording) return .ignore;
+        s.recording = false;
+        return .cancel;
+    }
     switch (s.mode) {
         .hold => switch (ev) {
-            .pressed => {
+            .hotkey_pressed => {
                 if (s.recording) return .ignore;
                 s.recording = true;
                 return .start;
             },
-            .released => {
+            .hotkey_released => {
                 if (!s.recording) return .ignore;
                 s.recording = false;
                 return .stop;
             },
+            .cancel_pressed => unreachable, // handled above
         },
         .toggle => switch (ev) {
-            .released => return .ignore,
-            .pressed => {
+            .hotkey_released => return .ignore,
+            .hotkey_pressed => {
                 s.press_count += 1;
                 if (!s.recording) {
                     s.recording = true;
@@ -105,6 +111,7 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
                 s.recording = false;
                 return .stop;
             },
+            .cancel_pressed => unreachable, // handled above
         },
     }
 }
@@ -232,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer zhisper.inject.destroy();
-    zhisper.hotkey.setup(.{ .key_code = cfg.hotkey.key_code, .mode = mode, .evdev = cfg.hotkey.evdev, .evdev_name = cfg.hotkey.evdev_name }) catch |err| {
+    zhisper.hotkey.setup(.{ .key_code = cfg.hotkey.key_code, .mode = mode, .evdev = cfg.hotkey.evdev, .evdev_name = cfg.hotkey.evdev_name, .cancel_key_code = cfg.hotkey.cancel_key_code }) catch |err| {
         std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -282,7 +289,7 @@ pub fn main(init: std.process.Init) !void {
     var start_ts: std.Io.Clock.Timestamp = undefined;
     var have_start = false;
     var wav_counter: u32 = 0;
-    daemon_log.info("listening (mode={s}, key={d})", .{ cfg.hotkey.mode, cfg.hotkey.key_code });
+    daemon_log.info("listening (mode={s}, key={d}, cancel={d})", .{ cfg.hotkey.mode, cfg.hotkey.key_code, cfg.hotkey.cancel_key_code });
 
     while (!stop_requested.load(.monotonic)) {
         const ev = zhisper.hotkey.pollEvent();
@@ -299,6 +306,13 @@ pub fn main(init: std.process.Init) !void {
                         daemon_log.debug("record start failed: {s}", .{@errorName(err)});
                         loop_state.recording = false;
                         have_start = false;
+                    };
+                },
+                .cancel => {
+                    daemon_log.info("cancelled recording", .{});
+                    have_start = false;
+                    zhisper.audio.setRecording(.cancel, "") catch |err| {
+                        daemon_log.debug("record cancel failed: {s}", .{@errorName(err)});
                     };
                 },
                 .stop => {
@@ -415,18 +429,41 @@ test "buildTranscribeConfig copies provider fields plus key" {
 
 test "hold press starts, release stops, extras ignored" {
     var s = LoopState{ .mode = .hold };
-    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .pressed));
-    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .pressed));
-    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .released));
-    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .hotkey_released));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .hotkey_released));
 }
 
 test "toggle alternates on press and ignores release" {
     var s = LoopState{ .mode = .toggle };
-    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .pressed));
-    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
-    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .pressed));
-    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .released));
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .hotkey_released));
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .hotkey_released));
+}
+
+test "cancel while recording returns cancel and resets" {
+    var s = LoopState{ .mode = .toggle };
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Action.cancel, handleHotkeyEvent(&s, .cancel_pressed));
+    try std.testing.expect(!s.recording);
+    // next press is a fresh start, not a stop
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .hotkey_pressed));
+}
+
+test "cancel in hold mode makes trailing release a no-op" {
+    var s = LoopState{ .mode = .hold };
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Action.cancel, handleHotkeyEvent(&s, .cancel_pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .hotkey_released));
+}
+
+test "cancel while idle is ignored" {
+    var s = LoopState{ .mode = .hold };
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .cancel_pressed));
+    var t = LoopState{ .mode = .toggle };
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&t, .cancel_pressed));
 }
 
 test "overlay state derives from recording then pending" {
