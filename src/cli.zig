@@ -3,23 +3,26 @@ const argz = @import("argz");
 const config = @import("zhisper").config;
 
 const help_text =
+    // NOTE: argz scans help_text at comptime under the default 1000-branch
+    // quota. Keep this text short; put verbose docs in config.example.toml.
     \\usage zhisper [options...]
     \\
     \\options:
     \\.  -h, --help                print this help and exit
     \\.      --provider=<str>      groq | openai | custom
-    \\.      --model=<str>         model override (empty = preset)
-    \\.      --base-url=<str>      base URL override (required if provider=custom)
+    \\.      --model=<str>         model (empty = preset)
+    \\.      --base-url=<str>      base URL (provider=custom only)
     \\.      --prompt=<str>        transcription prompt
-    \\.      --key-code=<uint>     OS-native hotkey code (default 67=F9)
+    \\.      --key-code=<uint>     hotkey code (default 67=F9)
     \\.      --mode=<str>          hold | toggle
-    \\.      --evdev=<str>         Linux evdev path or name:DEVICE (empty = auto-scan)
-    \\.      --device=<str>        mic device (empty = default)
-    \\.      --list-devices          list capture mics and exit
+    \\.      --cancel-key-code=<uint>  cancel key (0=off, 46=C)
+    \\.      --evdev=<str>         Linux evdev path/name:DEV (empty = auto-scan)
+    \\.      --device=<str>        mic (empty = default)
+    \\.      --list-devices          list mics and exit
     \\.      --wav-path=<str>      wav output path
-    \\.      --min-duration-ms=<uint>  discard recordings shorter than this (ms)
-    \\.      --keep-wav            keep WAV on error (default keep)
-    \\.      --no-keep-wav         do not keep WAV on error
+    \\.      --min-duration-ms=<uint>  drop clips below this length (ms)
+    \\.      --keep-wav            keep WAV on error
+    \\.      --no-keep-wav         don't keep WAV on error
     \\.  -v, --verbose             verbose logging
     \\
 ;
@@ -41,6 +44,7 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.prompt) |v| cli.prompt = v;
     if (parsed.@"key-code") |v| cli.key_code = std.math.cast(u16, v);
     if (parsed.mode) |v| cli.mode = v;
+    if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(u16, v);
     // --evdev accepts either a path (/dev/input/event5) or a logical
     // device name (name:kanata) that survives reboot renumbering.
     if (parsed.evdev) |v| {
@@ -122,4 +126,13 @@ test "cli parses list-devices flag" {
     const argv = [_][:0]const u8{ "zhisper", "--list-devices" };
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqual(true, got.list_devices);
+}
+
+test "cli parses cancel-key-code flag" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--cancel-key-code=48" };
+    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqual(@as(u16, 48), got.cancel_key_code.?);
 }

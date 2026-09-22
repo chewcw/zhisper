@@ -13,6 +13,7 @@ pub const HotkeyCfg = struct {
     mode: []const u8 = "hold",
     evdev: []const u8 = "",
     evdev_name: []const u8 = "",
+    cancel_key_code: u16 = 46,
 };
 
 pub const AudioCfg = struct {
@@ -46,6 +47,7 @@ pub const CliOverrides = struct {
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
     evdev_name: ?[]const u8 = null,
+    cancel_key_code: ?u16 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -116,6 +118,7 @@ pub const EnvValues = struct {
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
     evdev_name: ?[]const u8 = null,
+    cancel_key_code: ?u16 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -133,6 +136,7 @@ pub fn applyEnv(cfg: Config, env: EnvValues) Config {
     if (env.mode) |v| out.hotkey.mode = v;
     if (env.evdev) |v| out.hotkey.evdev = v;
     if (env.evdev_name) |v| out.hotkey.evdev_name = v;
+    if (env.cancel_key_code) |v| out.hotkey.cancel_key_code = v;
     if (env.device) |v| out.audio.device = v;
     if (env.min_duration_ms) |v| out.daemon.min_duration_ms = v;
     if (env.wav_path) |v| out.daemon.wav_path = v;
@@ -151,6 +155,7 @@ pub fn applyCli(cfg: Config, cli: CliOverrides) Config {
         .mode = cli.mode,
         .evdev = cli.evdev,
         .evdev_name = cli.evdev_name,
+        .cancel_key_code = cli.cancel_key_code,
         .device = cli.device,
         .min_duration_ms = cli.min_duration_ms,
         .wav_path = cli.wav_path,
@@ -173,6 +178,7 @@ pub fn validate(cfg: Config) !void {
     }
     if (!std.mem.eql(u8, cfg.hotkey.mode, "hold") and !std.mem.eql(u8, cfg.hotkey.mode, "toggle")) return error.InvalidMode;
     if (cfg.hotkey.key_code == 0) return error.InvalidKeyCode;
+    if (cfg.hotkey.cancel_key_code != 0 and cfg.hotkey.cancel_key_code == cfg.hotkey.key_code) return error.CancelEqualsHotkey;
     if (cfg.daemon.min_duration_ms == 0) return error.InvalidDuration;
 }
 
@@ -209,6 +215,7 @@ pub fn readEnvValues() EnvValues {
         .mode = envStr("ZHISPER_MODE"),
         .evdev = envStr("ZHISPER_EVDEV"),
         .evdev_name = envStr("ZHISPER_EVDEV_NAME"),
+        .cancel_key_code = envU16("ZHISPER_CANCEL_KEY_CODE"),
         .device = envStr("ZHISPER_DEVICE"),
         .min_duration_ms = envU32("ZHISPER_MIN_DURATION_MS"),
         .wav_path = envStr("ZHISPER_WAV_PATH"),
@@ -241,7 +248,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8, cli: CliOverri
 // single owner of this list; the struct definitions above own the values.
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
-    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name" } },
+    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code" } },
     .{ .name = "audio", .keys = &.{ "device" } },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "verbose" } },
 };
@@ -376,4 +383,30 @@ test "load with missing file yields defaults plus CLI" {
     defer freeConfig(gpa, cfg);
     try std.testing.expectEqual(@as(u16, 70), cfg.hotkey.key_code);
     try std.testing.expectEqualStrings("groq", cfg.transcribe.provider);
+}
+
+test "cancel_key_code defaults to 46 and overlays via env struct" {
+    const cfg = defaultConfig();
+    try std.testing.expectEqual(@as(u16, 46), cfg.hotkey.cancel_key_code);
+    const out = applyEnv(cfg, .{ .cancel_key_code = 48 });
+    try std.testing.expectEqual(@as(u16, 48), out.hotkey.cancel_key_code);
+}
+
+test "validate accepts 0 but rejects cancel equal to hotkey" {
+    var cfg = defaultConfig();
+    cfg.hotkey.cancel_key_code = 0;
+    try validate(cfg);
+    cfg.hotkey.cancel_key_code = cfg.hotkey.key_code;
+    try std.testing.expectError(error.CancelEqualsHotkey, validate(cfg));
+}
+
+test "parseFileConfig reads cancel_key_code" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc = "[hotkey]\ncancel_key_code = 48\n";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-cancel.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-cancel.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-cancel.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectEqual(@as(u16, 48), cfg.hotkey.cancel_key_code);
 }
