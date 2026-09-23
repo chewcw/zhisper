@@ -275,6 +275,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     var overlay_state: zhisper.overlay.State = .idle;
+    // Animation clock base: pill frames use millis since daemon start
+    // (monotonic .awake clock, same source as the recording timer below).
+    const overlay_t0: std.Io.Clock.Timestamp = std.Io.Clock.Timestamp.now(io, .awake);
 
     const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
     const api_key = resolveApiKey(provider) orelse {
@@ -377,6 +380,11 @@ pub fn main(init: std.process.Init) !void {
         }
         // One-way state push on change only (never from the worker thread).
         if (overlay_live) {
+            // Pill animation frame (the backend throttles to 30fps and
+            // guards clock jumps; negative deltas clamp to 0).
+            const now_uptime = std.Io.Clock.Timestamp.now(io, .awake);
+            const uptime_ns: u64 = @intCast(@max(0, overlay_t0.durationTo(now_uptime).raw.nanoseconds));
+            zhisper.overlay.tick(uptime_ns / 1_000_000);
             queue.mutex.lockUncancelable(io);
             const pending = queue.has_pending;
             queue.mutex.unlock(io);
