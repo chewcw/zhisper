@@ -6,6 +6,7 @@ var queue_len: usize = 0;
 var queue_pos: usize = 0;
 var last_state: ?types.State = null;
 var last_move: ?types.Position = null;
+var last_tick: ?u64 = null;
 var shown: bool = false;
 
 pub fn pushTestEvent(ev: types.Event) void {
@@ -19,6 +20,7 @@ pub fn reset() void {
     queue_pos = 0;
     last_state = null;
     last_move = null;
+    last_tick = null;
     shown = false;
 }
 
@@ -40,6 +42,14 @@ pub fn move(pos: types.Position) void {
 
 pub fn setState(s: types.State) void {
     last_state = s;
+}
+
+pub fn tick(t_ms: u64) void {
+    last_tick = t_ms;
+}
+
+pub fn testLastTick() ?u64 {
+    return last_tick;
 }
 
 /// Headless/tests: no monitors. The SDL backend (Task 5) enumerates real

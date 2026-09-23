@@ -38,6 +38,10 @@ pub fn setState(s: State) void {
     return impl.setState(s);
 }
 
+pub fn tick(t_ms: u64) void {
+    return impl.tick(t_ms);
+}
+
 /// Display list in global desktop coordinates, primary first. Caller
 /// owns the slice. Empty under stub/headless; SDL backend enumerates.
 pub fn displayList(gpa: std.mem.Allocator) ![]types.Display {
@@ -100,6 +104,18 @@ test "facade replays stub drag events and records state" {
     try std.testing.expectEqual(State.working, stub.testLastState().?);
     move(.{ .x = 1, .y = 2 });
     try std.testing.expectEqual(2, stub.testLastMove().?.y);
+    destroy();
+}
+
+test "facade records tick without display" {
+    const stub = @import("overlay_stub.zig");
+    stub.reset();
+    defer stub.reset();
+    try setup(.{});
+    tick(1234);
+    try std.testing.expectEqual(@as(?u64, 1234), stub.testLastTick());
+    tick(1240);
+    try std.testing.expectEqual(@as(?u64, 1240), stub.testLastTick());
     destroy();
 }
 
