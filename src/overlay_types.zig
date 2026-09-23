@@ -2,6 +2,47 @@ const std = @import("std");
 
 pub const window_size: i32 = 72;
 pub const ball_radius: i32 = 36;
+pub const window_w: i32 = 240;
+pub const window_h: i32 = 72; // == window_size (height alias)
+pub const orb_r: i32 = 34;
+const morph_ms: u64 = 200;
+
+pub fn breatheRadius(t_ms: u64) f32 {
+    const t: f32 = @as(f32, @floatFromInt(t_ms)) / 2400.0;
+    return @as(f32, @floatFromInt(orb_r)) + 2.0 * @sin(t * 2.0 * std.math.pi);
+}
+
+pub fn morphProgress(elapsed_ms: u64) f32 {
+    if (elapsed_ms >= morph_ms) return 1.0;
+    const e: f32 = @as(f32, @floatFromInt(elapsed_ms)) / @as(f32, @floatFromInt(morph_ms));
+    const u: f32 = 1.0 - e;
+    return 1.0 - u * u * u; // ease-out cubic
+}
+
+pub fn waveBar(t_ms: u64, i: usize) f32 {
+    const t: f32 = @floatFromInt(t_ms);
+    const k: f32 = @floatFromInt(i);
+    const a: f32 = t / 180.0 + k * 0.9;
+    const b: f32 = t / 97.0 + k * 1.7;
+    const v: f32 = 0.5 + 0.28 * @sin(a) + 0.22 * @sin(b);
+    return std.math.clamp(v, 0.0, 1.0);
+}
+
+pub fn spinnerAngle(t_ms: u64) f32 {
+    const frac: f32 = @as(f32, @floatFromInt(t_ms % 1000)) / 1000.0;
+    return frac * 2.0 * std.math.pi;
+}
+
+/// Stadium hit-test: rect x in [36,204) full height, plus end circles
+/// at (36,36) and (204,36) radius 36. Corners outside both are rejected.
+pub fn hitTestPill(lx: i32, ly: i32) bool {
+    if (lx < 0 or ly < 0 or lx >= window_w or ly >= window_h) return false;
+    if (lx >= ball_radius and lx < window_w - ball_radius) return true;
+    const cx: i32 = if (lx < ball_radius) ball_radius else window_w - ball_radius;
+    const dx = lx - cx;
+    const dy = ly - ball_radius;
+    return dx * dx + dy * dy <= ball_radius * ball_radius;
+}
 
 pub const Position = struct { x: i32, y: i32 };
 pub const State = enum { idle, recording, working };
@@ -89,8 +130,8 @@ pub fn defaultForDisplays(displays: []const Display) Position {
 pub fn clampToDisplay(p: Position, d: Display) Position {
     const min_x = d.x;
     const min_y = d.y;
-    const max_x: i32 = @max(d.x, d.x + d.w - window_size);
-    const max_y: i32 = @max(d.y, d.y + d.h - window_size);
+    const max_x: i32 = @max(d.x, d.x + d.w - window_w);
+    const max_y: i32 = @max(d.y, d.y + d.h - window_h);
     return .{ .x = std.math.clamp(p.x, min_x, max_x), .y = std.math.clamp(p.y, min_y, max_y) };
 }
 
@@ -114,12 +155,12 @@ test "hit-test accepts center and rim, rejects corners" {
 
 test "clamp keeps the 72px window on-display" {
     try std.testing.expectEqual(Position{ .x = 0, .y = 0 }, clampPosition(.{ .x = -5, .y = -9 }, 800, 600));
-    try std.testing.expectEqual(Position{ .x = 728, .y = 528 }, clampPosition(.{ .x = 9999, .y = 9999 }, 800, 600));
+    try std.testing.expectEqual(Position{ .x = 560, .y = 528 }, clampPosition(.{ .x = 9999, .y = 9999 }, 800, 600));
     try std.testing.expectEqual(Position{ .x = 100, .y = 100 }, clampPosition(.{ .x = 100, .y = 100 }, 800, 600));
 }
 
 test "default position is bottom-right inset" {
-    try std.testing.expectEqual(Position{ .x = 700, .y = 500 }, defaultPosition(800, 600));
+    try std.testing.expectEqual(Position{ .x = 560, .y = 500 }, defaultPosition(800, 600));
     try std.testing.expectEqual(Position{ .x = 0, .y = 0 }, defaultPosition(50, 50));
 }
 
@@ -147,5 +188,43 @@ test "multi-monitor: center decides visibility, unplugged falls back" {
     // Empty display list (headless): nothing visible, default to safe corner.
     try std.testing.expect(!isVisible(.{ .x = 100, .y = 100 }, &.{}));
     try std.testing.expectEqual(Position{ .x = 64, .y = 64 }, defaultForDisplays(&.{}));
-    try std.testing.expectEqual(Position{ .x = 1820, .y = 980 }, defaultForDisplays(&both));
+    try std.testing.expectEqual(Position{ .x = 1680, .y = 980 }, defaultForDisplays(&both));
+}
+
+test "animation math bounds and determinism" {
+    // breathe in [32,36]
+    const r0 = breatheRadius(0);
+    const r600 = breatheRadius(600);
+    const r1200 = breatheRadius(1200);
+    for ([_]f32{ r0, r600, r1200 }) |r| {
+        try std.testing.expect(r >= 32.0 and r <= 36.0);
+    }
+    try std.testing.expect(r0 != r600);
+    // morph 0 -> 1 over 200ms, monotonic
+    try std.testing.expectEqual(@as(f32, 0.0), morphProgress(0));
+    const m50 = morphProgress(50);
+    const m150 = morphProgress(150);
+    try std.testing.expect(m50 > 0.0 and m50 < m150 and m150 < 1.0);
+    try std.testing.expectEqual(@as(f32, 1.0), morphProgress(200));
+    try std.testing.expectEqual(@as(f32, 1.0), morphProgress(5000));
+    // wave deterministic + in [0,1]
+    try std.testing.expectEqual(waveBar(1000, 2), waveBar(1000, 2));
+    try std.testing.expect(waveBar(1000, 0) != waveBar(1000, 1));
+    for (0..5) |i| {
+        const w = waveBar(1234, i);
+        try std.testing.expect(w >= 0.0 and w <= 1.0);
+    }
+    // spinner wraps every 1000ms
+    try std.testing.expectApproxEqAbs(spinnerAngle(0), spinnerAngle(1000), 1e-5);
+    try std.testing.expect(spinnerAngle(250) > spinnerAngle(0));
+}
+
+test "hitTestPill accepts orb and capsule, rejects corners" {
+    try std.testing.expect(hitTestPill(36, 36)); // orb center
+    try std.testing.expect(hitTestPill(120, 36)); // capsule middle
+    try std.testing.expect(hitTestPill(204, 36)); // right end center
+    try std.testing.expect(!hitTestPill(0, 0)); // top-left corner cutout
+    try std.testing.expect(!hitTestPill(239, 0)); // top-right corner cutout
+    try std.testing.expect(!hitTestPill(0, 71));
+    try std.testing.expect(!hitTestPill(239, 71));
 }
