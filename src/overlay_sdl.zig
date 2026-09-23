@@ -2,12 +2,20 @@ const std = @import("std");
 const types = @import("overlay_types.zig");
 const sdl3 = @import("sdl3");
 
-// SDL3 backend (non-test builds only): 72x72 borderless transparent
-// always-on-top non-focusable tool window with a tinted ball.
+// SDL3 backend (non-test builds only): 240x72 borderless transparent
+// always-on-top non-focusable tool window. Idle draws a breathing orb at
+// the left; recording/working draw a full-window capsule (pill) with a
+// fake waveform / stable spinner. Left-anchored: saved Position is the
+// top-left corner, so existing overlay.pos files keep working.
 // Main thread only — the worker thread never touches these.
 var window: ?sdl3.video.Window = null;
 var renderer: ?sdl3.render.Renderer = null;
 var tint: types.Rgba = types.stateTint(.idle);
+var cur_state: types.State = .idle;
+var prev_state: types.State = .idle;
+var state_start_ms: u64 = 0;
+var last_tick_ms: u64 = 0;
+var last_present_ms: ?u64 = null;
 var dragging: bool = false;
 var drag_moved: bool = false;
 var inited: bool = false;
@@ -19,13 +27,109 @@ fn redraw() void {
     r.clear() catch return;
     const t = tint;
     r.setDrawColor(.{ .r = t.r, .g = t.g, .b = t.b, .a = t.a }) catch return;
-    // Midpoint scanline fill of the inscribed circle (center 36,36, r 36).
+    // Midpoint scanline fill of the orb (center 36,36, r 36) on the left
+    // side of the 240x72 window; the rest stays transparent.
     var y: i32 = -types.ball_radius;
     while (y <= types.ball_radius) : (y += 1) {
         const half: f32 = @sqrt(@as(f32, @floatFromInt(types.ball_radius * types.ball_radius - y * y)));
         const cy: f32 = @as(f32, @floatFromInt(types.ball_radius + y));
         const cx: f32 = @as(f32, @floatFromInt(types.ball_radius));
         r.renderLine(.{ .x = cx - half, .y = cy }, .{ .x = cx + half, .y = cy }) catch return;
+    }
+    r.present() catch return;
+}
+
+/// Scanline orb at (36,36) with float radius (breathing).
+fn drawOrb(r: sdl3.render.Renderer, radius_f: f32) void {
+    const cx: f32 = 36.0;
+    const cy: f32 = 36.0;
+    const ri: i32 = @intFromFloat(@round(radius_f));
+    var dy: i32 = -ri;
+    while (dy <= ri) : (dy += 1) {
+        const half: f32 = @sqrt(@as(f32, @floatFromInt(ri * ri - dy * dy)));
+        const y: f32 = cy + @as(f32, @floatFromInt(dy));
+        r.renderLine(.{ .x = cx - half, .y = y }, .{ .x = cx + half, .y = y }) catch return;
+    }
+}
+
+/// Stadium fill for the morph: left end circle fixed at cx=36, right end
+/// circle slides 36 -> 204 with `morph` (0 = orb, 1 = full capsule).
+/// Rows use the circle equation so top/bottom rows inset into round caps.
+fn drawStadium(r: sdl3.render.Renderer, morph: f32) void {
+    const right_cx: f32 = 36.0 + (204.0 - 36.0) * morph;
+    var y: i32 = 0;
+    while (y < types.window_h) : (y += 1) {
+        const dy: f32 = @as(f32, @floatFromInt(y)) + 0.5 - 36.0;
+        if (@abs(dy) > 36.0) continue;
+        const half: f32 = @sqrt(36.0 * 36.0 - dy * dy);
+        const x0: f32 = 36.0 - half;
+        const x1: f32 = right_cx + half;
+        r.renderLine(.{ .x = x0, .y = @as(f32, @floatFromInt(y)) }, .{ .x = x1, .y = @as(f32, @floatFromInt(y)) }) catch return;
+    }
+}
+
+pub fn tick(t_ms: u64) void {
+    const r = renderer orelse return;
+    if (window == null) return;
+    last_tick_ms = t_ms;
+    if (last_present_ms) |lp| {
+        // 30fps throttle + clock-jump guard (time going backwards = redraw).
+        if (t_ms >= lp and t_ms - lp < 33) return;
+    }
+    last_present_ms = t_ms;
+    var elapsed: u64 = 0;
+    if (t_ms >= state_start_ms) {
+        elapsed = t_ms - state_start_ms;
+        if (elapsed > 5000) elapsed = 5000;
+    }
+    const raw_morph = types.morphProgress(elapsed);
+    // Growing into the pill for recording/working; shrinking back to the
+    // orb when settling to idle. Once shrunk, latch prev=cur (idle steady).
+    var morph = raw_morph;
+    var settling_idle = false;
+    if (cur_state == .idle and prev_state != .idle) {
+        settling_idle = true;
+        morph = 1.0 - raw_morph;
+        if (raw_morph >= 1.0) {
+            prev_state = .idle;
+            settling_idle = false;
+        }
+    }
+    r.setDrawBlendMode(.blend) catch return;
+    r.setDrawColor(.{ .r = 0, .g = 0, .b = 0, .a = 0 }) catch return;
+    r.clear() catch return;
+    if (cur_state == .idle and !settling_idle) {
+        r.setDrawColor(.{ .r = tint.r, .g = tint.g, .b = tint.b, .a = 230 }) catch return;
+        drawOrb(r, types.breatheRadius(t_ms));
+    } else {
+        // Growing capsule; content appears once mostly grown.
+        r.setDrawColor(.{ .r = tint.r, .g = tint.g, .b = tint.b, .a = tint.a }) catch return;
+        drawStadium(r, morph);
+        if (morph > 0.9) {
+            if (cur_state == .recording) {
+                var i: usize = 0;
+                while (i < 5) : (i += 1) {
+                    const h = types.waveBar(t_ms, i) * 40.0 + 4.0;
+                    const x: f32 = 108.0 + @as(f32, @floatFromInt(i)) * 20.0;
+                    r.setDrawColor(.{ .r = 255, .g = 255, .b = 255, .a = 217 }) catch return;
+                    r.renderLine(.{ .x = x, .y = 36.0 - h / 2.0 }, .{ .x = x, .y = 36.0 + h / 2.0 }) catch return;
+                }
+            } else if (cur_state == .working) {
+                // Fixed center (150,36), radius 14: layout never jumps mid-cycle.
+                const ang = types.spinnerAngle(t_ms);
+                var i: usize = 0;
+                while (i < 8) : (i += 1) {
+                    const a = ang + @as(f32, @floatFromInt(i)) * 2.0 * std.math.pi;
+                    const x: f32 = 150.0 + 14.0 * @cos(a);
+                    const yy: f32 = 36.0 + 14.0 * @sin(a);
+                    const alpha: u8 = if (i == 0) 255 else 140;
+                    r.setDrawColor(.{ .r = 255, .g = 255, .b = 255, .a = alpha }) catch return;
+                    r.renderLine(.{ .x = x, .y = yy }, .{ .x = x + 1.0, .y = yy }) catch return;
+                }
+            } else {
+                // Settling back to idle: shrinking stadium only, no content.
+            }
+        }
     }
     r.present() catch return;
 }
@@ -84,7 +188,7 @@ pub fn setup(_: types.OverlayConfig) !void {
     // OS gets a native hint as a follow-up — not here.
     sdl3.init(.{ .video = true }) catch return error.SdlFailed;
     errdefer sdl3.quit(.{ .video = true });
-    const w = sdl3.video.Window.init("zhisper", types.window_size, types.window_size, .{
+    const w = sdl3.video.Window.init("zhisper", types.window_w, types.window_h, .{
         .borderless = true,
         .transparent = true,
         .always_on_top = true,
@@ -96,6 +200,11 @@ pub fn setup(_: types.OverlayConfig) !void {
     window = w;
     renderer = r;
     inited = true;
+    cur_state = .idle;
+    prev_state = .idle;
+    state_start_ms = 0;
+    last_tick_ms = 0;
+    last_present_ms = null;
     tint = types.stateTint(.idle);
     redraw();
 }
@@ -114,6 +223,9 @@ pub fn destroy() void {
         sdl3.shutdown();
         inited = false;
     }
+    cur_state = .idle;
+    prev_state = .idle;
+    last_present_ms = null;
     dragging = false;
 }
 
@@ -168,8 +280,12 @@ pub fn displayList(gpa: std.mem.Allocator) ![]types.Display {
 }
 
 pub fn setState(s: types.State) void {
+    if (s == cur_state) return;
+    prev_state = cur_state;
+    cur_state = s;
+    state_start_ms = last_tick_ms;
     tint = types.stateTint(s);
-    redraw();
+    // Draw is deferred to tick (30fps throttle); nothing to do here.
 }
 
 pub fn pollEvent() ?types.Event {
@@ -178,9 +294,9 @@ pub fn pollEvent() ?types.Event {
         switch (sev) {
             .mouse_button_down => |mb| {
                 if (mb.button != .left) continue;
-                // Window-local coords; presses outside the circle never
+                // Window-local coords; presses outside the pill never
                 // start a drag (corners stay click-through-tolerant).
-                if (!types.hitTestCircle(@intFromFloat(mb.x), @intFromFloat(mb.y))) continue;
+                if (!types.hitTestPill(@intFromFloat(mb.x), @intFromFloat(mb.y))) continue;
                 dragging = true;
                 drag_moved = false;
                 return .{ .drag_start = windowPos(w) };
