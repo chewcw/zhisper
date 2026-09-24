@@ -2,6 +2,8 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const KeyEvent = @import("hotkey_types.zig").KeyEvent;
+const clipboard = @import("clipboard.zig");
+const log = @import("log.zig");
 
 fn closeFd(fd: posix.fd_t) void {
     _ = linux.close(fd);
@@ -31,6 +33,18 @@ const press_hold_us: u64 = 8000;
 const release_gap_us: u64 = 2000;
 
 var fd_uinput: posix.fd_t = -1;
+
+/// Clipboard probe result cached at setup() time for typeText().
+/// Defaults to unavailable until setup() probes.
+var clipboard_state: clipboard.Clipboard = .{ .available = false, .tool = null };
+
+/// True when text contains multi-byte UTF-8 (any byte > 0x7F).
+/// Such text cannot go through the US-ASCII keyForChar path and
+/// must use the clipboard paste path.
+pub fn needsClipboard(text: []const u8) bool {
+    for (text) |b| if (b > 0x7F) return true;
+    return false;
+}
 
 pub fn buildUinputSetup() UinputSetup {
     var uisetup: UinputSetup = std.mem.zeroes(UinputSetup);
@@ -101,6 +115,11 @@ pub fn setup(io: std.Io) !void {
 
     // Give libinput/udev a moment to pick up the new device.
     try io.sleep(.fromMilliseconds(100), .awake);
+
+    clipboard_state = clipboard.check(std.heap.page_allocator, io);
+    if (!clipboard_state.available) {
+        log.warn("Clipboard unavailable — non-ASCII injection disabled");
+    }
 }
 
 fn setKeyBit(code: usize) !void {
@@ -246,8 +265,19 @@ fn tapCode(code: u16, shift: bool, io: std.Io) !void {
 
 /// Types UTF-8 ASCII text via the uinput device. US layout. Returns
 /// characters injected; stops at the first unmapped byte.
+/// Multi-byte UTF-8 (any byte > 0x7F) goes through the clipboard:
+/// copy via clipboard.paste() then emit Ctrl+V. Returns bytes pasted.
 pub fn typeText(text: []const u8, io: std.Io) !usize {
     if (fd_uinput < 0) return error.NotSetup;
+    if (needsClipboard(text)) {
+        try clipboard.paste(text, io, clipboard_state);
+        // Emit Ctrl+V to paste the clipboard contents.
+        try emitKey(@intCast(c.KEY_LEFTCTRL), .hotkey_pressed);
+        errdefer emitKey(@intCast(c.KEY_LEFTCTRL), .hotkey_released) catch {};
+        try tapCode(@intCast(c.KEY_V), false, io);
+        try emitKey(@intCast(c.KEY_LEFTCTRL), .hotkey_released);
+        return text.len;
+    }
     var count: usize = 0;
     for (text) |ch| {
         const kp = keyForChar(ch) orelse return error.UnsupportedCharacter;
@@ -415,4 +445,19 @@ test "typeText without setup returns NotSetup" {
     fd_uinput = -1;
     defer fd_uinput = saved;
     try std.testing.expectError(error.NotSetup, typeText("hi", std.testing.io));
+}
+
+test "typeText with multi-byte UTF-8 triggers clipboard path" {
+    // Non-ASCII byte (Mandarin '你' = 0xE4 0xBD 0xA0) triggers clipboard branch.
+    const text = "你";
+    // Branch check: first byte > 0x7F means clipboard.
+    try std.testing.expect(text[0] > 0x7F);
+    try std.testing.expect(needsClipboard(text));
+    try std.testing.expect(!needsClipboard("hi"));
+    try std.testing.expect(needsClipboard("hi 你"));
+    // Without setup, still NotSetup (clipboard branch is after the fd guard).
+    const saved_fd = fd_uinput;
+    fd_uinput = -1;
+    defer fd_uinput = saved_fd;
+    try std.testing.expectError(error.NotSetup, typeText(text, std.testing.io));
 }

@@ -20,6 +20,13 @@ pub fn shouldLog(level: std.log.Level) bool {
     return isEnabled();
 }
 
+/// Single warning outlet for clipboard-unavailable and similar
+/// non-fatal setup issues. Routes through scoped `.inject` warn log
+/// so it respects the existing `logFn` gating (visible with verbose).
+pub fn warn(msg: []const u8) void {
+    std.log.scoped(.inject).warn("{s}", .{msg});
+}
+
 fn checkEnv() bool {
     if (std.c.getenv("ZHISPER_DEBUG")) |raw| {
         if (raw[0] != 0) return true;

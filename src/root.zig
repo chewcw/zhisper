@@ -13,6 +13,7 @@ pub const overlay = @import("overlay.zig");
 pub const overlay_types = @import("overlay_types.zig");
 pub const config = @import("config.zig");
 pub const log = @import("log.zig");
+pub const clipboard = @import("clipboard.zig");
 
 test {
     std.testing.refAllDecls(@import("audio.zig"));
@@ -31,6 +32,10 @@ test {
     std.testing.refAllDecls(@import("inject_macos.zig"));
     std.testing.refAllDecls(@import("config.zig"));
     std.testing.refAllDecls(@import("log.zig"));
+    std.testing.refAllDecls(@import("clipboard.zig"));
+    std.testing.refAllDecls(@import("clipboard_linux.zig"));
+    std.testing.refAllDecls(@import("clipboard_macos.zig"));
+    std.testing.refAllDecls(@import("clipboard_windows.zig"));
     if (builtin.os.tag == .linux) {
         std.testing.refAllDecls(@import("inject_linux.zig"));
         std.testing.refAllDecls(@import("hotkey_linux.zig"));
