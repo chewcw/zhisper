@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const clipboard = @import("clipboard.zig");
 const log = @import("log.zig");
 
@@ -12,8 +13,11 @@ pub fn needsClipboard(text: []const u8) bool {
 }
 
 pub fn setup(io: std.Io) !void {
-    clipboard_state = clipboard.check(std.heap.page_allocator, io);
-    if (!clipboard_state.available) log.warn("Clipboard unavailable — non-ASCII injection disabled");
+    // Skip probe warning in tests (stub is always unavailable -> stderr noise).
+    if (!builtin.is_test) {
+        clipboard_state = clipboard.check(std.heap.page_allocator, io);
+        if (!clipboard_state.available) log.warn("Clipboard unavailable — non-ASCII injection disabled");
+    }
     return error.UnsupportedOs;
 }
 

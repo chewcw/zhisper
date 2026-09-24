@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
 const KeyEvent = @import("hotkey_types.zig").KeyEvent;
@@ -116,9 +117,14 @@ pub fn setup(io: std.Io) !void {
     // Give libinput/udev a moment to pick up the new device.
     try io.sleep(.fromMilliseconds(100), .awake);
 
-    clipboard_state = clipboard.check(std.heap.page_allocator, io);
-    if (!clipboard_state.available) {
-        log.warn("Clipboard unavailable — non-ASCII injection disabled");
+    // Skip the clipboard probe warning during tests: clipboard.zig uses a
+    // stub (always unavailable) under is_test, so warning here would just
+    // pollute test stderr and make `zig build test` echo the test command.
+    if (!builtin.is_test) {
+        clipboard_state = clipboard.check(std.heap.page_allocator, io);
+        if (!clipboard_state.available) {
+            log.warn("Clipboard unavailable — non-ASCII injection disabled");
+        }
     }
 }
 
