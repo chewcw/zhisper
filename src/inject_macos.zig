@@ -15,7 +15,7 @@ pub fn needsClipboard(text: []const u8) bool {
 pub fn setup(io: std.Io) !void {
     // Skip probe warning in tests (stub is always unavailable -> stderr noise).
     if (!builtin.is_test) {
-        clipboard_state = clipboard.check(std.heap.page_allocator, io);
+        clipboard_state = clipboard.check(io);
         if (!clipboard_state.available) log.warn("Clipboard unavailable — non-ASCII injection disabled");
     }
     return error.UnsupportedOs;

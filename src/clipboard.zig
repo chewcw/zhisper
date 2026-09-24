@@ -10,7 +10,7 @@ pub const Clipboard = struct {
 
 const impl = if (builtin.is_test)
     struct {
-        pub fn check(_: std.mem.Allocator, _: std.Io) Clipboard {
+        pub fn check(_: std.Io) Clipboard {
             return .{ .available = false, .tool = null };
         }
         pub fn paste(_: []const u8, _: std.Io, _: Clipboard) !void {
@@ -24,8 +24,8 @@ else switch (builtin.os.tag) {
     else => @compileError("clipboard: unsupported OS"),
 };
 
-pub fn check(gpa: std.mem.Allocator, io: std.Io) Clipboard {
-    return impl.check(gpa, io);
+pub fn check(io: std.Io) Clipboard {
+    return impl.check(io);
 }
 
 pub fn paste(text: []const u8, io: std.Io, clipboard_state: Clipboard) !void {
@@ -33,12 +33,12 @@ pub fn paste(text: []const u8, io: std.Io, clipboard_state: Clipboard) !void {
 }
 
 test "clipboard stub detects missing tool" {
-    const c = check(std.testing.allocator, std.testing.io);
+    const c = check(std.testing.io);
     try std.testing.expect(!c.available);
     try std.testing.expect(c.tool == null);
 }
 
 test "paste stub returns not implemented" {
-    const c = check(std.testing.allocator, std.testing.io);
+    const c = check(std.testing.io);
     try std.testing.expectError(error.ClipboardNotImplemented, paste("hi", std.testing.io, c));
 }

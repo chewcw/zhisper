@@ -4,8 +4,7 @@ const clipboard = @import("clipboard.zig");
 /// Windows clipboard backend: `clip` ships with Windows, always available.
 /// Paste via `clip` stdin. Pure Zig so it cross-compiles from Linux.
 
-pub fn check(gpa: std.mem.Allocator, io: std.Io) clipboard.Clipboard {
-    _ = gpa;
+pub fn check(io: std.Io) clipboard.Clipboard {
     _ = io;
     return .{ .available = true, .tool = "clip" };
 }

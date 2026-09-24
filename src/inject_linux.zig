@@ -121,7 +121,7 @@ pub fn setup(io: std.Io) !void {
     // stub (always unavailable) under is_test, so warning here would just
     // pollute test stderr and make `zig build test` echo the test command.
     if (!builtin.is_test) {
-        clipboard_state = clipboard.check(std.heap.page_allocator, io);
+        clipboard_state = clipboard.check(io);
         if (!clipboard_state.available) {
             log.warn("Clipboard unavailable — non-ASCII injection disabled");
         }

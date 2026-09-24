@@ -17,8 +17,7 @@ fn probe(io: std.Io, argv: []const []const u8) bool {
     return term.exited == 0;
 }
 
-pub fn check(gpa: std.mem.Allocator, io: std.Io) clipboard.Clipboard {
-    _ = gpa;
+pub fn check(io: std.Io) clipboard.Clipboard {
     if (probe(io, &.{ "which", "xclip" })) return .{ .available = true, .tool = "xclip" };
     if (probe(io, &.{ "which", "wl-copy" })) return .{ .available = true, .tool = "wl-copy" };
     return .{ .available = false, .tool = null };
