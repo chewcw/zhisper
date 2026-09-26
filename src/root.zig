@@ -44,5 +44,6 @@ test {
     if (builtin.os.tag == .linux) {
         std.testing.refAllDecls(@import("inject_linux.zig"));
         std.testing.refAllDecls(@import("hotkey_linux.zig"));
+        std.testing.refAllDecls(@import("tray_linux.zig"));
     }
 }

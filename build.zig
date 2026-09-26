@@ -56,6 +56,7 @@ pub fn build(b: *std.Build) void {
     if (target.result.os.tag == .linux) {
         const zstbi_dep = b.dependency("zstbi", .{ .target = target, .optimize = optimize });
         mod.addImport("zstbi", zstbi_dep.module("root"));
+        mod.linkSystemLibrary("X11", .{});
     }
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
