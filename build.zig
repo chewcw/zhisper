@@ -58,6 +58,14 @@ pub fn build(b: *std.Build) void {
         mod.addImport("zstbi", zstbi_dep.module("root"));
         mod.linkSystemLibrary("X11", .{});
     }
+    if (target.result.os.tag == .windows) {
+        mod.addCSourceFile(.{ .file = b.path("src/tray_windows.c") });
+        mod.linkSystemLibrary("user32", .{});
+        mod.linkSystemLibrary("gdi32", .{});
+        mod.linkSystemLibrary("shell32", .{});
+        mod.linkSystemLibrary("ole32", .{});
+        mod.linkSystemLibrary("windowscodecs", .{});
+    }
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business

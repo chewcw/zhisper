@@ -46,4 +46,7 @@ test {
         std.testing.refAllDecls(@import("hotkey_linux.zig"));
         std.testing.refAllDecls(@import("tray_linux.zig"));
     }
+    if (builtin.os.tag == .windows) {
+        std.testing.refAllDecls(@import("tray_windows.zig"));
+    }
 }
