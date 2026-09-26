@@ -30,7 +30,7 @@ device = ""       # empty = system default mic
 
 [daemon]
 min_duration_ms = 500
-wav_path = "/tmp/zhisper.wav"
+wav_path = ""   # "" = platform temp directory. Set an explicit path to override.
 keep_wav_on_error = true
 overlay = true     # false = no floating status pill (tray state unaffected)
 tray = false

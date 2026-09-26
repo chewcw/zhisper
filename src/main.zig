@@ -31,6 +31,36 @@ fn uniqueWavPath(gpa: std.mem.Allocator, base: []const u8, counter: u32) ![]u8 {
     return try std.fmt.allocPrint(gpa, "{s}-{d}", .{ base, counter });
 }
 
+/// Builds the recording path inside `dir`. Split from resolveWavPath so the
+/// path construction is testable without touching the real environment.
+fn wavPathIn(gpa: std.mem.Allocator, dir: ?[]const u8) ![]u8 {
+    const d = dir orelse return gpa.dupe(u8, "zhisper.wav");
+    const trimmed = std.mem.trimEnd(u8, d, "/\\");
+    if (trimmed.len == 0) return gpa.dupe(u8, "zhisper.wav");
+    return std.fmt.allocPrint(gpa, "{s}" ++ std.fs.path.sep_str ++ "zhisper.wav", .{trimmed});
+}
+
+/// WHY: the config default used to be the literal "/tmp/zhisper.wav", a
+/// hardcoded POSIX path in shared code. macOS survives that only because /tmp is
+/// a symlink to /private/tmp; Windows cannot write there at all. An empty
+/// config value now means "platform temp directory", resolved per OS the same
+/// way resolveConfigPath branches.
+fn resolveWavPath(gpa: std.mem.Allocator, configured: []const u8) ![]u8 {
+    if (configured.len != 0) return gpa.dupe(u8, configured);
+    const builtin = @import("builtin");
+    const keys: []const []const u8 = switch (builtin.os.tag) {
+        .windows => &.{ "TMP", "TEMP" },
+        else => &.{"TMPDIR"},
+    };
+    for (keys) |key| {
+        if (std.c.getenv(key)) |raw| {
+            const p = wavPathIn(gpa, std.mem.span(raw)) catch continue;
+            return p;
+        }
+    }
+    return wavPathIn(gpa, null);
+}
+
 fn buildTranscribeConfig(unified: zhisper.config.Config, api_key: []const u8) zhisper.transcribe.Config {
     return .{
         .base_url = unified.transcribe.base_url,
@@ -219,6 +249,7 @@ pub fn main(init: std.process.Init) !void {
     defer zhisper.config.freeConfig(arena, cfg);
     if (cfg.daemon.verbose) zhisper.log.setEnabled(true);
     try zhisper.config.validate(cfg);
+    const wav_base = try resolveWavPath(arena, cfg.daemon.wav_path);
 
     if (overrides.list_devices) {
         try zhisper.audio.listCaptureDevices(io);
@@ -372,7 +403,7 @@ pub fn main(init: std.process.Init) !void {
                 .stop => {
                     daemon_log.info("stop recording", .{});
                     wav_counter += 1;
-                    const wav_path = try uniqueWavPath(arena, cfg.daemon.wav_path, wav_counter);
+                    const wav_path = try uniqueWavPath(arena, wav_base, wav_counter);
                     defer arena.free(wav_path);
                     zhisper.audio.setRecording(.stop, wav_path) catch |err| {
                         daemon_log.debug("record stop failed: {s}", .{@errorName(err)});
@@ -489,6 +520,31 @@ test "uniqueWavPath inserts a counter before the extension" {
     const got = try uniqueWavPath(gpa, "/tmp/zhisper.wav", 7);
     defer gpa.free(got);
     try std.testing.expectEqualStrings("/tmp/zhisper-7.wav", got);
+}
+
+test "wavPathIn builds the recording name in the given directory" {
+    const gpa = std.testing.allocator;
+    const p = try wavPathIn(gpa, "/tmp");
+    defer gpa.free(p);
+    try std.testing.expectEqualStrings("/tmp" ++ std.fs.path.sep_str ++ "zhisper.wav", p);
+}
+
+test "wavPathIn trims trailing separators from the directory" {
+    const gpa = std.testing.allocator;
+    const p = try wavPathIn(gpa, "/tmp/");
+    defer gpa.free(p);
+    try std.testing.expectEqualStrings("/tmp" ++ std.fs.path.sep_str ++ "zhisper.wav", p);
+}
+
+test "wavPathIn falls back to the cwd when no directory is known" {
+    const gpa = std.testing.allocator;
+    const none = try wavPathIn(gpa, null);
+    defer gpa.free(none);
+    try std.testing.expectEqualStrings("zhisper.wav", none);
+
+    const blank = try wavPathIn(gpa, "///");
+    defer gpa.free(blank);
+    try std.testing.expectEqualStrings("zhisper.wav", blank);
 }
 
 test "buildTranscribeConfig copies provider fields plus key" {

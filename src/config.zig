@@ -43,7 +43,8 @@ pub const AudioCfg = struct {
 
 pub const DaemonCfg = struct {
     min_duration_ms: u32 = 500,
-    wav_path: []const u8 = "/tmp/zhisper.wav",
+    /// "" resolves to the platform temp directory at startup.
+    wav_path: []const u8 = "",
     keep_wav_on_error: bool = true,
     overlay: bool = true,
     tray: bool = false,
