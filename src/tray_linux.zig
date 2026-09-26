@@ -163,6 +163,17 @@ fn embedWithOwner(owner: c.Window) void {
     _ = c.XFlush(d);
 }
 
+fn clientIsEmbedded() bool {
+    const d = display orelse return false;
+    var root: c.Window = 0;
+    var parent: c.Window = 0;
+    var children: [*c]c.Window = null;
+    var child_count: c_uint = 0;
+    if (c.XQueryTree(d, client_window, &root, &parent, &children, &child_count) == 0) return false;
+    if (children != null) _ = c.XFree(@ptrCast(children));
+    return parent != root;
+}
+
 pub fn setup(io: std.Io) !void {
     if (display != null) return;
 
@@ -264,9 +275,15 @@ pub fn poll(_: std.Io) void {
     // selection owner changes, so re-send XEMBED to the new owner instead of
     // allocating another client window.
     const owner = c.XGetSelectionOwner(d, selection_atom);
-    if (owner != 0 and owner != manager_owner) {
-        manager_owner = owner;
-        embedWithOwner(owner);
+    if (owner != 0) {
+        if (owner != manager_owner) {
+            manager_owner = owner;
+            embedWithOwner(owner);
+        } else if (!clientIsEmbedded()) {
+            // i3bar reload can keep the same selection window while
+            // returning the client to the root window.
+            embedWithOwner(owner);
+        }
     }
 }
 
