@@ -98,8 +98,8 @@ fn createStatePixmap(d: *c.Display, drawable: c.Drawable, visual: *c.Visual, png
     ) orelse return error.ImageDecodeFailed;
     // XCreateImage does not own the pixel buffer. Clear the pointer before
     // releasing the XImage wrapper so XDestroyImage does not free stack data.
-    ximage.*.data = null;
     defer if (ximage.*.f.destroy_image) |destroy_image| {
+        ximage.*.data = null;
         _ = destroy_image(ximage);
     };
 
