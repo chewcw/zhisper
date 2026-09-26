@@ -24,6 +24,7 @@ pub const DaemonCfg = struct {
     min_duration_ms: u32 = 500,
     wav_path: []const u8 = "/tmp/zhisper.wav",
     keep_wav_on_error: bool = true,
+    overlay: bool = true,
     tray: bool = false,
     verbose: bool = false,
 };
@@ -251,7 +252,7 @@ const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
     .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
-    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "tray", "verbose" } },
+    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "overlay", "tray", "verbose" } },
 };
 
 fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
@@ -337,6 +338,36 @@ test "daemon tray defaults off and parses opt-in" {
     const cfg = try parseFileConfig(gpa, io, "cfg-tray.toml");
     defer freeConfig(gpa, cfg);
     try std.testing.expect(cfg.daemon.tray);
+}
+
+test "daemon overlay defaults on and parses opt-out" {
+    try std.testing.expect(defaultConfig().daemon.overlay);
+
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const off_doc =
+        \\[daemon]
+        \\overlay = false
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-overlay.toml", .data = off_doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-overlay.toml") catch {};
+
+    const cfg = try parseFileConfig(gpa, io, "cfg-overlay.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expect(!cfg.daemon.overlay);
+
+    const on_doc =
+        \\[daemon]
+        \\overlay = true
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-overlay-on.toml", .data = on_doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-overlay-on.toml") catch {};
+
+    const on_cfg = try parseFileConfig(gpa, io, "cfg-overlay-on.toml");
+    defer freeConfig(gpa, on_cfg);
+    try std.testing.expect(on_cfg.daemon.overlay);
 }
 
 test "parseFileConfig rejects unknown fields" {

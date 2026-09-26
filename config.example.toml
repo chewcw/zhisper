@@ -24,5 +24,6 @@ device = ""       # empty = system default mic
 min_duration_ms = 500
 wav_path = "/tmp/zhisper.wav"
 keep_wav_on_error = true
+overlay = true     # false = no floating status pill (tray state unaffected)
 tray = false
 verbose = false
