@@ -57,6 +57,7 @@ pub fn build(b: *std.Build) void {
         const zstbi_dep = b.dependency("zstbi", .{ .target = target, .optimize = optimize });
         mod.addImport("zstbi", zstbi_dep.module("root"));
         mod.linkSystemLibrary("X11", .{});
+        mod.linkSystemLibrary("Xext", .{});
     }
     if (target.result.os.tag == .windows) {
         mod.addCSourceFile(.{ .file = b.path("src/tray_windows.c") });

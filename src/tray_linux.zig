@@ -6,6 +6,7 @@ const c = @cImport({
     @cInclude("X11/Xlib.h");
     @cInclude("X11/Xatom.h");
     @cInclude("X11/Xutil.h");
+    @cInclude("X11/extensions/shape.h");
 });
 
 const icon_size: c_int = 22;
@@ -30,6 +31,7 @@ var client_depth: c_int = 0;
 var selection_atom: c.Atom = 0;
 var manager_owner: c.Window = 0;
 var state_pixmaps: [3]c.Pixmap = .{ 0, 0, 0 };
+var state_masks: [3]c.Pixmap = .{ 0, 0, 0 };
 var current_state: types.State = .idle;
 var zstbi_ready = false;
 
@@ -48,7 +50,12 @@ fn cleanupResources() void {
             if (pixmap != 0) _ = c.XFreePixmap(d, pixmap);
         }
         state_pixmaps = .{ 0, 0, 0 };
+        for (state_masks) |mask| {
+            if (mask != 0) _ = c.XFreePixmap(d, mask);
+        }
+        state_masks = .{ 0, 0, 0 };
         if (client_colormap != 0) {
+            _ = c.XUninstallColormap(d, client_colormap);
             _ = c.XFreeColormap(d, client_colormap);
             client_colormap = 0;
         }
@@ -64,6 +71,24 @@ fn cleanupResources() void {
         zstbi.deinit();
         zstbi_ready = false;
     }
+}
+
+fn createStateMask(d: *c.Display, drawable: c.Drawable, png: []const u8) TrayError!c.Pixmap {
+    var image = zstbi.Image.loadFromMemory(png, 4) catch return error.ImageDecodeFailed;
+    defer image.deinit();
+
+    var mask_data: [((icon_size + 7) / 8) * icon_size]u8 = [_]u8{0} ** (((icon_size + 7) / 8) * icon_size);
+    for (0..icon_size) |y| {
+        for (0..icon_size) |x| {
+            const alpha = image.data[(y * icon_size + x) * 4 + 3];
+            if (alpha != 0) {
+                mask_data[y * ((icon_size + 7) / 8) + x / 8] |= @as(u8, 1) << @intCast(x % 8);
+            }
+        }
+    }
+    const mask = c.XCreateBitmapFromData(d, drawable, @ptrCast(&mask_data), icon_size, icon_size);
+    if (mask == 0) return error.XError;
+    return mask;
 }
 
 fn createStatePixmap(d: *c.Display, drawable: c.Drawable, visual: *c.Visual, depth: c_int, png: []const u8) TrayError!c.Pixmap {
@@ -166,6 +191,7 @@ pub fn setup(io: std.Io) !void {
     client_depth = manager_attributes.depth;
     client_colormap = c.XCreateColormap(d, root, client_visual.?, c.AllocNone);
     if (client_colormap == 0) return error.UnsupportedVisual;
+    _ = c.XInstallColormap(d, client_colormap);
 
     var attributes: c.XSetWindowAttributes = std.mem.zeroes(c.XSetWindowAttributes);
     attributes.colormap = client_colormap;
@@ -205,6 +231,7 @@ pub fn setup(io: std.Io) !void {
     const assets = [_][]const u8{ types.idle_png, types.recording_png, types.working_png };
     for (assets, 0..) |png, i| {
         state_pixmaps[i] = try createStatePixmap(d, client_window, client_visual.?, client_depth, png);
+        state_masks[i] = try createStateMask(d, client_window, png);
     }
 
     _ = c.XMapWindow(d, client_window);
@@ -217,7 +244,9 @@ pub fn setState(_: std.Io, state: types.State) !void {
     const d = display orelse return error.NotSetup;
     if (client_window == 0) return error.NotSetup;
     const pixmap = state_pixmaps[stateIndex(state)];
-    if (pixmap == 0) return error.NotSetup;
+    const mask = state_masks[stateIndex(state)];
+    if (pixmap == 0 or mask == 0) return error.NotSetup;
+    c.XShapeCombineMask(d, client_window, c.ShapeBounding, 0, 0, mask, c.ShapeSet);
     if (c.XSetWindowBackgroundPixmap(d, client_window, pixmap) == 0) return error.XError;
     _ = c.XClearWindow(d, client_window);
     _ = c.XFlush(d);
