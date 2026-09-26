@@ -48,7 +48,8 @@ fn wavPathIn(gpa: std.mem.Allocator, dir: ?[]const u8) ![]u8 {
 fn resolveWavPath(gpa: std.mem.Allocator, configured: []const u8) ![]u8 {
     if (configured.len != 0) return gpa.dupe(u8, configured);
     const builtin = @import("builtin");
-    const keys: []const []const u8 = switch (builtin.os.tag) {
+    // Sentinel-terminated because std.c.getenv takes [:0]const u8.
+    const keys: []const [:0]const u8 = switch (builtin.os.tag) {
         .windows => &.{ "TMP", "TEMP" },
         else => &.{"TMPDIR"},
     };
@@ -224,7 +225,7 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
             inject_log.debug("inject failed: {s}", .{@errorName(err)});
             continue;
         };
-        inject_log.debug("typed {d} chars", .{n});
+        inject_log.debug("typed {d} keystrokes", .{n});
 
         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
     }
@@ -279,7 +280,12 @@ pub fn main(init: std.process.Init) !void {
         }
         std.process.exit(1);
     };
-    zhisper.inject.setup(io) catch |err| {
+    const trailing_newline: zhisper.inject.TrailingNewline =
+        if (std.mem.eql(u8, cfg.daemon.trailing_newline, "send")) .send else .strip;
+    zhisper.inject.setup(io, .{
+        .trailing_newline = trailing_newline,
+        .type_delay_ms = cfg.daemon.type_delay_ms,
+    }) catch |err| {
         std.log.err("inject setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };

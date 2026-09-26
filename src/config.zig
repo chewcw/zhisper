@@ -45,6 +45,12 @@ pub const DaemonCfg = struct {
     min_duration_ms: u32 = 500,
     /// "" resolves to the platform temp directory at startup.
     wav_path: []const u8 = "",
+    /// "strip" drops newlines the transcript ends with; "send" keeps them.
+    /// Whisper output routinely ends in "\n", and emitting that as a real
+    /// Return submits a chat message mid-dictation.
+    trailing_newline: []const u8 = "strip",
+    /// 0 = platform default (macOS 2ms, Windows 0).
+    type_delay_ms: u16 = 0,
     keep_wav_on_error: bool = true,
     overlay: bool = true,
     tray: bool = false,
@@ -295,7 +301,7 @@ const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
     .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
-    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "overlay", "tray", "verbose" } },
+    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "verbose" } },
 };
 
 fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {

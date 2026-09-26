@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const clipboard = @import("clipboard.zig");
+const types = @import("inject_types.zig");
 const log = @import("log.zig");
 
 /// Cached probe from setup() for the clipboard path.
@@ -12,7 +13,7 @@ pub fn needsClipboard(text: []const u8) bool {
     return false;
 }
 
-pub fn setup(io: std.Io) !void {
+pub fn setup(io: std.Io, _: types.InjectOptions) !void {
     // Skip probe warning in tests (stub is always unavailable -> stderr noise).
     if (!builtin.is_test) {
         clipboard_state = clipboard.check(io);
@@ -32,7 +33,7 @@ pub fn typeText(text: []const u8, io: std.Io) !usize {
 pub fn destroy() void {}
 
 test "setup reports UnsupportedOs until the native typer lands" {
-    try std.testing.expectError(error.UnsupportedOs, setup(std.testing.io));
+    try std.testing.expectError(error.UnsupportedOs, setup(std.testing.io, .{}));
 }
 
 test "needsClipboard detects multi-byte UTF-8" {

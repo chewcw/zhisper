@@ -31,6 +31,8 @@ device = ""       # empty = system default mic
 [daemon]
 min_duration_ms = 500
 wav_path = ""   # "" = platform temp directory. Set an explicit path to override.
+trailing_newline = "strip"  # "strip" drops newlines the transcript ends with; "send" keeps them
+type_delay_ms = 0           # 0 = platform default (macOS 2ms, Windows 0)
 keep_wav_on_error = true
 overlay = true     # false = no floating status pill (tray state unaffected)
 tray = false

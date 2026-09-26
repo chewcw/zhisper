@@ -4,7 +4,19 @@ const posix = std.posix;
 const linux = std.os.linux;
 const KeyEvent = @import("hotkey_types.zig").KeyEvent;
 const clipboard = @import("clipboard.zig");
+const types = @import("inject_types.zig");
 const log = @import("log.zig");
+
+/// Setup-time policy, mirroring hotkey_linux.zig's active_cfg module var.
+var opts: types.InjectOptions = .{};
+
+/// Number of codepoints in a validated UTF-8 slice.
+fn countCodepoints(s: []const u8) usize {
+    var n: usize = 0;
+    var it = (std.unicode.Utf8View.init(s) catch return 0).iterator();
+    while (it.nextCodepoint()) |_| n += 1;
+    return n;
+}
 
 fn closeFd(fd: posix.fd_t) void {
     _ = linux.close(fd);
@@ -94,7 +106,8 @@ pub fn destroy() void {
     fd_uinput = -1;
 }
 
-pub fn setup(io: std.Io) !void {
+pub fn setup(io: std.Io, o: types.InjectOptions) !void {
+    opts = o;
     fd_uinput = try posix.openat(posix.AT.FDCWD, "/dev/uinput", .{
         .ACCMODE = .WRONLY,
         .NONBLOCK = true,
@@ -269,23 +282,28 @@ fn tapCode(code: u16, shift: bool, io: std.Io) !void {
     if (shift) try emitKey(c.KEY_LEFTSHIFT, .hotkey_released);
 }
 
-/// Types UTF-8 ASCII text via the uinput device. US layout. Returns
-/// characters injected; stops at the first unmapped byte.
+/// Types UTF-8 ASCII text via the uinput device. US layout. Returns the
+/// number of keystrokes emitted; stops at the first unmapped byte.
 /// Multi-byte UTF-8 (any byte > 0x7F) goes through the clipboard:
-/// copy via clipboard.paste() then emit Ctrl+V. Returns bytes pasted.
+/// copy via clipboard.paste() then emit Ctrl+V.
+/// Trailing newlines are stripped or kept per the setup-time policy.
 pub fn typeText(text: []const u8, io: std.Io) !usize {
     if (fd_uinput < 0) return error.NotSetup;
-    if (needsClipboard(text)) {
-        try clipboard.paste(text, io, clipboard_state);
+    _ = std.unicode.Utf8View.init(text) catch return error.InvalidUtf8;
+    const body = text[0 .. text.len - types.trailingCut(text, opts.trailing_newline)];
+    if (needsClipboard(body)) {
+        try clipboard.paste(body, io, clipboard_state);
         // Emit Ctrl+V to paste the clipboard contents.
         try emitKey(@intCast(c.KEY_LEFTCTRL), .hotkey_pressed);
         errdefer emitKey(@intCast(c.KEY_LEFTCTRL), .hotkey_released) catch {};
         try tapCode(@intCast(c.KEY_V), false, io);
         try emitKey(@intCast(c.KEY_LEFTCTRL), .hotkey_released);
-        return text.len;
+        return countCodepoints(body);
     }
     var count: usize = 0;
-    for (text) |ch| {
+    // Interior newlines need no special handling: keyForChar already maps
+    // '\n' to KEY_ENTER.
+    for (body) |ch| {
         const kp = keyForChar(ch) orelse return error.UnsupportedCharacter;
         try tapCode(kp.code, kp.shift, io);
         count += 1;
@@ -412,7 +430,7 @@ test "setup creates device" {
     defer destroy();
 
     const io = std.testing.io;
-    try setup(io);
+    try setup(io, .{});
     try std.testing.expect(fd_uinput >= 0);
 }
 
