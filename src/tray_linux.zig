@@ -9,8 +9,8 @@ const c = @cImport({
 });
 
 const icon_size: c_int = 22;
-const xembed_version: c_long = 0;
-const xembed_embed: c_long = 0;
+const xembed_version: c_long = 1;
+const system_tray_request_dock: c_long = 0;
 const xembed_info_flags_mapped: c_long = 1;
 
 const TrayError = error{
@@ -26,6 +26,7 @@ var display: ?*c.Display = null;
 var client_window: c.Window = 0;
 var client_colormap: c.Colormap = 0;
 var client_visual: ?*c.Visual = null;
+var client_depth: c_int = 0;
 var selection_atom: c.Atom = 0;
 var manager_owner: c.Window = 0;
 var state_pixmaps: [3]c.Pixmap = .{ 0, 0, 0 };
@@ -55,6 +56,7 @@ fn cleanupResources() void {
     }
     display = null;
     client_visual = null;
+    client_depth = 0;
     selection_atom = 0;
     manager_owner = 0;
     current_state = .idle;
@@ -64,7 +66,7 @@ fn cleanupResources() void {
     }
 }
 
-fn createStatePixmap(d: *c.Display, drawable: c.Drawable, visual: *c.Visual, png: []const u8) TrayError!c.Pixmap {
+fn createStatePixmap(d: *c.Display, drawable: c.Drawable, visual: *c.Visual, depth: c_int, png: []const u8) TrayError!c.Pixmap {
     var image = zstbi.Image.loadFromMemory(png, 4) catch return error.ImageDecodeFailed;
     defer image.deinit();
 
@@ -87,7 +89,7 @@ fn createStatePixmap(d: *c.Display, drawable: c.Drawable, visual: *c.Visual, png
     const ximage = c.XCreateImage(
         d,
         visual,
-        32,
+        @intCast(depth),
         c.ZPixmap,
         0,
         @ptrCast(&pixels),
@@ -103,17 +105,17 @@ fn createStatePixmap(d: *c.Display, drawable: c.Drawable, visual: *c.Visual, png
         _ = destroy_image(ximage);
     };
 
-    const pixmap = c.XCreatePixmap(d, drawable, icon_size, icon_size, 32);
+    const pixmap = c.XCreatePixmap(d, drawable, icon_size, icon_size, @intCast(depth));
     if (pixmap == 0) return error.XError;
     const gc = c.XCreateGC(d, pixmap, 0, null) orelse {
         _ = c.XFreePixmap(d, pixmap);
         return error.XError;
     };
     defer _ = c.XFreeGC(d, gc);
-    if (c.XPutImage(d, pixmap, gc, ximage, 0, 0, 0, 0, icon_size, icon_size) == 0) {
-        _ = c.XFreePixmap(d, pixmap);
-        return error.XError;
-    }
+    // XPutImage returns 0 on both success and failure in libX11; the request
+    // is flushed and server-side errors are reported through Xlib's handler.
+    _ = c.XPutImage(d, pixmap, gc, ximage, 0, 0, 0, 0, icon_size, icon_size);
+    _ = c.XSync(d, 0);
     return pixmap;
 }
 
@@ -121,15 +123,17 @@ fn embedWithOwner(owner: c.Window) void {
     const d = display orelse return;
     const opcode = c.XInternAtom(d, "_NET_SYSTEM_TRAY_OPCODE", 0);
     var message: c.XClientMessageEvent = std.mem.zeroes(c.XClientMessageEvent);
-    message.type = @intCast(opcode);
+    message.type = c.ClientMessage;
     message.send_event = 1;
     message.display = d;
     message.window = owner;
     message.message_type = opcode;
     message.format = 32;
-    message.data.l[0] = xembed_embed;
-    message.data.l[1] = @intCast(client_window);
-    message.data.l[2] = xembed_version;
+    // _NET_SYSTEM_TRAY_OPCODE is (timestamp, request-dock, client-window).
+    // i3bar reparents the client only when this exact layout is used.
+    message.data.l[0] = 0;
+    message.data.l[1] = system_tray_request_dock;
+    message.data.l[2] = @intCast(client_window);
     _ = c.XSendEvent(d, owner, 0, c.NoEventMask, @ptrCast(&message));
     _ = c.XFlush(d);
 }
@@ -143,13 +147,6 @@ pub fn setup(io: std.Io) !void {
 
     const screen = c.XDefaultScreen(d);
     const root = c.XRootWindow(d, screen);
-    var visual_info: c.XVisualInfo = undefined;
-    if (c.XMatchVisualInfo(d, screen, 32, c.TrueColor, &visual_info) == 0) {
-        return error.UnsupportedVisual;
-    }
-    client_visual = visual_info.visual;
-    client_colormap = c.XCreateColormap(d, root, visual_info.visual, c.AllocNone);
-    if (client_colormap == 0) return error.UnsupportedVisual;
 
     var selection_name_buf: [64]u8 = undefined;
     const selection_name = std.fmt.bufPrint(&selection_name_buf, "_NET_SYSTEM_TRAY_S{d}", .{screen}) catch return error.NoTrayManager;
@@ -157,6 +154,18 @@ pub fn setup(io: std.Io) !void {
     selection_atom = c.XInternAtom(d, @ptrCast(&selection_name_buf), 0);
     manager_owner = c.XGetSelectionOwner(d, selection_atom);
     if (manager_owner == 0) return error.NoTrayManager;
+
+    // The tray protocol publishes the visual that tray clients must use.
+    // i3bar advertises its 24-bit bar visual here; using an arbitrary 32-bit
+    // ARGB visual makes the embedded window valid but invisible in i3bar.
+    var manager_attributes: c.XWindowAttributes = undefined;
+    if (c.XGetWindowAttributes(d, manager_owner, &manager_attributes) == 0) {
+        return error.UnsupportedVisual;
+    }
+    client_visual = manager_attributes.visual;
+    client_depth = manager_attributes.depth;
+    client_colormap = c.XCreateColormap(d, root, client_visual.?, c.AllocNone);
+    if (client_colormap == 0) return error.UnsupportedVisual;
 
     var attributes: c.XSetWindowAttributes = std.mem.zeroes(c.XSetWindowAttributes);
     attributes.colormap = client_colormap;
@@ -170,9 +179,9 @@ pub fn setup(io: std.Io) !void {
         icon_size,
         icon_size,
         0,
-        32,
+        client_depth,
         c.InputOutput,
-        visual_info.visual,
+        client_visual.?,
         c.CWColormap | c.CWBorderPixel | c.CWOverrideRedirect,
         &attributes,
     );
@@ -195,7 +204,7 @@ pub fn setup(io: std.Io) !void {
     zstbi_ready = true;
     const assets = [_][]const u8{ types.idle_png, types.recording_png, types.working_png };
     for (assets, 0..) |png, i| {
-        state_pixmaps[i] = try createStatePixmap(d, client_window, visual_info.visual, png);
+        state_pixmaps[i] = try createStatePixmap(d, client_window, client_visual.?, client_depth, png);
     }
 
     _ = c.XMapWindow(d, client_window);
