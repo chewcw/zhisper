@@ -9,12 +9,33 @@ pub const TranscribeCfg = struct {
 };
 
 pub const HotkeyCfg = struct {
-    key_code: u16 = 67,
+    /// OS-native key code; null and -1 both mean "disabled". 0 is a real key
+    /// (macOS kVK_ANSI_A is 0).
+    ///
+    /// WHY i16 and not u16: the vendored toml parser assigns integers with a
+    /// safety-checked @intCast, so a negative value aimed at an unsigned field
+    /// panics at startup instead of erroring. The field default is null because
+    /// the parser forces an *absent* optional to null before it consults
+    /// default_value_ptr; the real defaults are applied in parseFileConfig.
+    key_code: ?i16 = null,
     mode: []const u8 = "hold",
     evdev: []const u8 = "",
     evdev_name: []const u8 = "",
-    cancel_key_code: u16 = 46,
+    cancel_key_code: ?i16 = null,
 };
+
+/// Default hotkey: KEY_F9 on Linux.
+pub const default_key_code: i16 = 67;
+/// Default cancel key: KEY_C on Linux.
+pub const default_cancel_key_code: i16 = 46;
+
+/// Single place that knows the disabled sentinel, so validate() and main.zig
+/// cannot disagree about what -1 means. Any non-positive value means "off".
+pub fn keyCodeOf(v: ?i16) ?u16 {
+    const n = v orelse return null;
+    if (n < 0) return null;
+    return @intCast(n);
+}
 
 pub const AudioCfg = struct {
     device: []const u8 = "",
@@ -37,7 +58,12 @@ pub const Config = struct {
 };
 
 pub fn defaultConfig() Config {
-    return .{};
+    return .{
+        .hotkey = .{
+            .key_code = default_key_code,
+            .cancel_key_code = default_cancel_key_code,
+        },
+    };
 }
 
 pub const CliOverrides = struct {
@@ -45,11 +71,11 @@ pub const CliOverrides = struct {
     model: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
-    key_code: ?u16 = null,
+    key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
     evdev_name: ?[]const u8 = null,
-    cancel_key_code: ?u16 = null,
+    cancel_key_code: ?i16 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -71,7 +97,14 @@ pub fn parseFileConfig(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Co
     // result.value borrows the parse arena, which deinit frees — copy every
     // string into gpa so the returned Config outlives this call. Release
     // with freeConfig. (defaultConfig borrows literals and must NOT be freed.)
-    return try dupeConfig(gpa, result.value);
+    var out = try dupeConfig(gpa, result.value);
+    // An absent optional key parses to null (the toml parser forces null before
+    // it consults the field default), and this function's result replaces the
+    // default config wholesale rather than merging into it. So re-apply the
+    // defaults here.
+    if (out.hotkey.key_code == null) out.hotkey.key_code = default_key_code;
+    if (out.hotkey.cancel_key_code == null) out.hotkey.cancel_key_code = default_cancel_key_code;
+    return out;
 }
 
 /// Copies every string field out of `cfg` into gpa-owned memory.
@@ -116,11 +149,11 @@ pub const EnvValues = struct {
     model: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
-    key_code: ?u16 = null,
+    key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
     evdev_name: ?[]const u8 = null,
-    cancel_key_code: ?u16 = null,
+    cancel_key_code: ?i16 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -179,8 +212,10 @@ pub fn validate(cfg: Config) !void {
         if (cfg.transcribe.model.len == 0) return error.MissingModel;
     }
     if (!std.mem.eql(u8, cfg.hotkey.mode, "hold") and !std.mem.eql(u8, cfg.hotkey.mode, "toggle")) return error.InvalidMode;
-    if (cfg.hotkey.key_code == 0) return error.InvalidKeyCode;
-    if (cfg.hotkey.cancel_key_code != 0 and cfg.hotkey.cancel_key_code == cfg.hotkey.key_code) return error.CancelEqualsHotkey;
+    const hotkey = keyCodeOf(cfg.hotkey.key_code) orelse return error.InvalidKeyCode;
+    if (keyCodeOf(cfg.hotkey.cancel_key_code)) |cancel| {
+        if (cancel == hotkey) return error.CancelEqualsHotkey;
+    }
     if (cfg.daemon.min_duration_ms == 0) return error.InvalidDuration;
 }
 
@@ -188,6 +223,13 @@ fn envStr(name: [*:0]const u8) ?[]const u8 {
     const raw = std.c.getenv(name) orelse return null;
     if (raw[0] == 0) return null;
     return std.mem.span(raw);
+}
+
+fn envI16(name: [*:0]const u8) ?i16 {
+    const s = envStr(name) orelse return null;
+    // i16, not u16, so ZHISPER_KEY_CODE=-1 is a real value rather than a parse
+    // failure that silently falls back to the default.
+    return std.fmt.parseInt(i16, s, 10) catch null;
 }
 
 fn envU16(name: [*:0]const u8) ?u16 {
@@ -213,11 +255,11 @@ pub fn readEnvValues() EnvValues {
         .model = envStr("ZHISPER_MODEL"),
         .base_url = envStr("ZHISPER_BASE_URL"),
         .prompt = envStr("ZHISPER_PROMPT"),
-        .key_code = envU16("ZHISPER_KEY_CODE"),
+        .key_code = envI16("ZHISPER_KEY_CODE"),
         .mode = envStr("ZHISPER_MODE"),
         .evdev = envStr("ZHISPER_EVDEV"),
         .evdev_name = envStr("ZHISPER_EVDEV_NAME"),
-        .cancel_key_code = envU16("ZHISPER_CANCEL_KEY_CODE"),
+        .cancel_key_code = envI16("ZHISPER_CANCEL_KEY_CODE"),
         .device = envStr("ZHISPER_DEVICE"),
         .min_duration_ms = envU32("ZHISPER_MIN_DURATION_MS"),
         .wav_path = envStr("ZHISPER_WAV_PATH"),
@@ -284,6 +326,18 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
                 ok = true;
                 break;
             };
+            // Range-check the key codes on the way through. WHY: the toml parser
+            // assigns integers with a safety-checked @intCast, so a value like
+            // 70000 in the file would panic the daemon at startup. This has to
+            // run *before* the `ok` check below, which skips known keys.
+            if (std.mem.eql(u8, "key_code", entry.key_ptr.*) or
+                std.mem.eql(u8, "cancel_key_code", entry.key_ptr.*))
+            {
+                if (entry.value_ptr.* == .integer) {
+                    const v = entry.value_ptr.integer;
+                    if (v < -1 or v > 32767) return error.InvalidKeyCode;
+                }
+            }
             if (ok) continue;
             if (std.mem.eql(u8, "api_key", entry.key_ptr.*)) return error.ApiKeyInFile;
             return error.UnknownField;
@@ -294,7 +348,7 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
 test "defaultConfig matches spec defaults" {
     const cfg = defaultConfig();
     try std.testing.expectEqualStrings("groq", cfg.transcribe.provider);
-    try std.testing.expectEqual(@as(u16, 67), cfg.hotkey.key_code);
+    try std.testing.expectEqual(@as(?i16, 67), cfg.hotkey.key_code);
     try std.testing.expectEqualStrings("hold", cfg.hotkey.mode);
     try std.testing.expectEqual(@as(u32, 500), cfg.daemon.min_duration_ms);
 }
@@ -317,7 +371,7 @@ test "parseFileConfig reads example-shaped TOML" {
     const cfg = try parseFileConfig(gpa, io, "cfg-parse.toml");
     defer freeConfig(gpa, cfg);
     try std.testing.expectEqualStrings("openai", cfg.transcribe.provider);
-    try std.testing.expectEqual(@as(u16, 70), cfg.hotkey.key_code);
+    try std.testing.expectEqual(@as(?i16, 70), cfg.hotkey.key_code);
     try std.testing.expectEqualStrings("toggle", cfg.hotkey.mode);
     try std.testing.expectEqual(@as(u32, 800), cfg.daemon.min_duration_ms);
 }
@@ -394,7 +448,7 @@ test "applyEnv overlays file values" {
     try std.testing.expectEqualStrings("whisper-1", out.transcribe.model);
     try std.testing.expectEqualStrings("/dev/input/event5", out.hotkey.evdev);
     // unset fields keep file values
-    try std.testing.expectEqual(@as(u16, 67), out.hotkey.key_code);
+    try std.testing.expectEqual(@as(?i16, 67), out.hotkey.key_code);
 }
 
 test "applyEnv overlays evdev_name" {
@@ -431,23 +485,75 @@ test "load with missing file yields defaults plus CLI" {
     const gpa = std.testing.allocator;
     const cfg = try load(gpa, std.testing.io, "/tmp/zhisper-missing-config.toml", .{ .key_code = 70 });
     defer freeConfig(gpa, cfg);
-    try std.testing.expectEqual(@as(u16, 70), cfg.hotkey.key_code);
+    try std.testing.expectEqual(@as(?i16, 70), cfg.hotkey.key_code);
     try std.testing.expectEqualStrings("groq", cfg.transcribe.provider);
 }
 
 test "cancel_key_code defaults to 46 and overlays via env struct" {
     const cfg = defaultConfig();
-    try std.testing.expectEqual(@as(u16, 46), cfg.hotkey.cancel_key_code);
+    try std.testing.expectEqual(@as(?i16, 46), cfg.hotkey.cancel_key_code);
     const out = applyEnv(cfg, .{ .cancel_key_code = 48 });
-    try std.testing.expectEqual(@as(u16, 48), out.hotkey.cancel_key_code);
+    try std.testing.expectEqual(@as(?i16, 48), out.hotkey.cancel_key_code);
 }
 
-test "validate accepts 0 but rejects cancel equal to hotkey" {
+test "validate accepts a disabled cancel key but rejects one equal to the hotkey" {
     var cfg = defaultConfig();
-    cfg.hotkey.cancel_key_code = 0;
+    cfg.hotkey.cancel_key_code = -1;
     try validate(cfg);
     cfg.hotkey.cancel_key_code = cfg.hotkey.key_code;
     try std.testing.expectError(error.CancelEqualsHotkey, validate(cfg));
+}
+
+test "keyCodeOf maps null and -1 to disabled" {
+    try std.testing.expect(keyCodeOf(null) == null);
+    try std.testing.expect(keyCodeOf(-1) == null);
+}
+
+test "keyCodeOf preserves 0 as a real key" {
+    try std.testing.expectEqual(@as(?u16, 0), keyCodeOf(0));
+    try std.testing.expectEqual(@as(?u16, 67), keyCodeOf(67));
+    try std.testing.expectEqual(@as(?u16, 32767), keyCodeOf(32767));
+}
+
+test "validate rejects a disabled hotkey" {
+    var cfg = defaultConfig();
+    cfg.hotkey.key_code = -1;
+    try std.testing.expectError(error.InvalidKeyCode, validate(cfg));
+    cfg.hotkey.key_code = null;
+    try std.testing.expectError(error.InvalidKeyCode, validate(cfg));
+}
+
+test "parseFileConfig defaults an omitted key code to KEY_F9" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc = "[daemon]\ntray = false\n";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-nokey.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-nokey.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-nokey.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectEqual(@as(?i16, 67), cfg.hotkey.key_code);
+    try std.testing.expectEqual(@as(?i16, 46), cfg.hotkey.cancel_key_code);
+}
+
+test "parseFileConfig reads -1 as a disabled key code" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc = "[hotkey]\nkey_code = -1\ncancel_key_code = -1\n";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-off.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-off.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-off.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectEqual(@as(?i16, -1), cfg.hotkey.key_code);
+    try std.testing.expectEqual(@as(?i16, -1), cfg.hotkey.cancel_key_code);
+}
+
+test "parseFileConfig rejects an out-of-range key code instead of panicking" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc = "[hotkey]\nkey_code = 70000\n";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-huge.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-huge.toml") catch {};
+    try std.testing.expectError(error.InvalidKeyCode, parseFileConfig(gpa, io, "cfg-huge.toml"));
 }
 
 test "parseFileConfig reads cancel_key_code" {
@@ -458,5 +564,5 @@ test "parseFileConfig reads cancel_key_code" {
     defer std.Io.Dir.cwd().deleteFile(io, "cfg-cancel.toml") catch {};
     const cfg = try parseFileConfig(gpa, io, "cfg-cancel.toml");
     defer freeConfig(gpa, cfg);
-    try std.testing.expectEqual(@as(u16, 48), cfg.hotkey.cancel_key_code);
+    try std.testing.expectEqual(@as(?i16, 48), cfg.hotkey.cancel_key_code);
 }

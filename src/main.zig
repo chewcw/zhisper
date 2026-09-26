@@ -253,7 +253,17 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer zhisper.inject.destroy();
-    zhisper.hotkey.setup(.{ .key_code = cfg.hotkey.key_code, .mode = mode, .evdev = cfg.hotkey.evdev, .evdev_name = cfg.hotkey.evdev_name, .cancel_key_code = cfg.hotkey.cancel_key_code }) catch |err| {
+    const hotkey_code = zhisper.config.keyCodeOf(cfg.hotkey.key_code) orelse {
+        std.log.err("hotkey.key_code must be set to a real key code (use -1 to disable the cancel key, not the hotkey)", .{});
+        std.process.exit(1);
+    };
+    zhisper.hotkey.setup(.{
+        .key_code = hotkey_code,
+        .mode = mode,
+        .evdev = cfg.hotkey.evdev,
+        .evdev_name = cfg.hotkey.evdev_name,
+        .cancel_key_code = zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
+    }) catch |err| {
         std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -332,7 +342,7 @@ pub fn main(init: std.process.Init) !void {
     var start_ts: std.Io.Clock.Timestamp = undefined;
     var have_start = false;
     var wav_counter: u32 = 0;
-    daemon_log.info("listening (mode={s}, key={d}, cancel={d})", .{ cfg.hotkey.mode, cfg.hotkey.key_code, cfg.hotkey.cancel_key_code });
+    daemon_log.info("listening (mode={s}, key={d}, cancel={d})", .{ cfg.hotkey.mode, hotkey_code, zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0 });
 
     while (!stop_requested.load(.monotonic)) {
         if (tray_live) zhisper.tray.poll(io);

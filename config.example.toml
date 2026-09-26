@@ -10,10 +10,18 @@ model = ""        # empty = preset default
 base_url = ""     # empty = preset default; required if provider=custom
 prompt = ""
 
+# Key codes are OS-native and are NOT interchangeable between platforms.
+#           Linux  macOS  Windows
+#   A        30     0      0x41
+#   C        46     8      0x43
+#   F9       67     0x78   0x78
+#   Return   28     36     0x0D
+#   Tab      15     48     0x09
+# Use -1 to disable a key. 0 is a real key (macOS 'A'), not "disabled".
 [hotkey]
-key_code = 67     # OS-native (Linux KEY_F9=67)
+key_code = 67     # OS-native; -1 disables. Linux KEY_F9=67 / macOS kVK_F9=0x78 / Windows VK_F9=0x78
 mode = "hold"     # hold | toggle
-cancel_key_code = 46  # Linux KEY_C; 0 = disabled (Windows/macOS: set native C code)
+cancel_key_code = 46  # OS-native; -1 disables. Linux KEY_C=46 / macOS kVK_C=8 / Windows VK_C=0x43
 evdev = ""        # Linux only, explicit /dev/input/eventN (empty = off, wins over evdev_name)
 evdev_name = ""   # Linux only, device name match e.g. "kanata" (empty = off, wins over auto-scan)
 

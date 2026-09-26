@@ -42,9 +42,9 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.model) |v| cli.model = v;
     if (parsed.@"base-url") |v| cli.base_url = v;
     if (parsed.prompt) |v| cli.prompt = v;
-    if (parsed.@"key-code") |v| cli.key_code = std.math.cast(u16, v);
+    if (parsed.@"key-code") |v| cli.key_code = std.math.cast(i16, v);
     if (parsed.mode) |v| cli.mode = v;
-    if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(u16, v);
+    if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(i16, v);
     // --evdev accepts either a path (/dev/input/event5) or a logical
     // device name (name:kanata) that survives reboot renumbering.
     if (parsed.evdev) |v| {
@@ -71,7 +71,7 @@ test "cli parses flags into overrides" {
     const argv = [_][:0]const u8{ "zhisper", "--provider", "openai", "--key-code=70", "--verbose" };
     const cli = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqualStrings("openai", cli.provider.?);
-    try std.testing.expectEqual(@as(u16, 70), cli.key_code.?);
+    try std.testing.expectEqual(@as(?i16, 70), cli.key_code.?);
     try std.testing.expectEqual(true, cli.verbose.?);
 }
 
@@ -134,5 +134,5 @@ test "cli parses cancel-key-code flag" {
     defer arena.deinit();
     const argv = [_][:0]const u8{ "zhisper", "--cancel-key-code=48" };
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
-    try std.testing.expectEqual(@as(u16, 48), got.cancel_key_code.?);
+    try std.testing.expectEqual(@as(?i16, 48), got.cancel_key_code.?);
 }
