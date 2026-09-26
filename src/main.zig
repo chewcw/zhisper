@@ -299,6 +299,26 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
 
+    var tray_live = false;
+    if (cfg.daemon.tray) {
+        if (zhisper.tray.setup(io)) |_| {
+            tray_live = true;
+        } else |err| {
+            daemon_log.warn("tray setup failed (continuing without tray): {s}", .{@errorName(err)});
+        }
+    }
+    defer if (tray_live) {
+        zhisper.tray.destroy(io);
+    };
+    var tray_state: zhisper.tray.State = .idle;
+    if (tray_live) {
+        zhisper.tray.setState(io, .idle) catch |err| {
+            daemon_log.debug("tray idle update failed (disabling tray): {s}", .{@errorName(err)});
+            zhisper.tray.destroy(io);
+            tray_live = false;
+        };
+    }
+
     var queue = WorkQueue{};
     const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue });
 
@@ -309,6 +329,7 @@ pub fn main(init: std.process.Init) !void {
     daemon_log.info("listening (mode={s}, key={d}, cancel={d})", .{ cfg.hotkey.mode, cfg.hotkey.key_code, cfg.hotkey.cancel_key_code });
 
     while (!stop_requested.load(.monotonic)) {
+        if (tray_live) zhisper.tray.poll(io);
         const ev = zhisper.hotkey.pollEvent();
         if (ev) |e| {
             daemon_log.debug("ev: {any}", .{e});
@@ -406,6 +427,22 @@ pub fn main(init: std.process.Init) !void {
             if (cur != overlay_state) {
                 overlay_state = cur;
                 zhisper.overlay.setState(cur);
+            }
+        }
+        if (tray_live) {
+            queue.mutex.lockUncancelable(io);
+            const active = queue.active;
+            const has_pending = queue.has_pending;
+            queue.mutex.unlock(io);
+
+            const cur_tray = trayStateFor(loop_state.recording, active, has_pending);
+            if (cur_tray != tray_state) {
+                tray_state = cur_tray;
+                zhisper.tray.setState(io, cur_tray) catch |err| {
+                    daemon_log.debug("tray state update failed (disabling tray): {s}", .{@errorName(err)});
+                    zhisper.tray.destroy(io);
+                    tray_live = false;
+                };
             }
         }
     }
