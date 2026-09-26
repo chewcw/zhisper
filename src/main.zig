@@ -259,12 +259,18 @@ pub fn main(init: std.process.Init) !void {
     };
     defer zhisper.hotkey.destroy();
 
-    // Overlay is best-effort: any failure degrades to hotkey-only.
+    // Overlay is best-effort: any failure degrades to hotkey-only. With
+    // daemon.overlay = false the subsystem is never started, so there is
+    // no SDL window, no display enumeration, and no overlay.pos read.
     var overlay_live = false;
-    if (zhisper.overlay.setup(.{})) |_| {
-        overlay_live = true;
-    } else |err| {
-        daemon_log.debug("overlay setup failed (headless): {s}", .{@errorName(err)});
+    if (cfg.daemon.overlay) {
+        if (zhisper.overlay.setup(.{})) |_| {
+            overlay_live = true;
+        } else |err| {
+            daemon_log.debug("overlay setup failed (headless): {s}", .{@errorName(err)});
+        }
+    } else {
+        daemon_log.debug("overlay disabled by config", .{});
     }
     if (overlay_live) {
         zhisper.overlay.show() catch |err| {
