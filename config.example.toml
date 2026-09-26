@@ -24,4 +24,5 @@ device = ""       # empty = system default mic
 min_duration_ms = 500
 wav_path = "/tmp/zhisper.wav"
 keep_wav_on_error = true
+tray = false
 verbose = false

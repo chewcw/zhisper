@@ -24,6 +24,7 @@ pub const DaemonCfg = struct {
     min_duration_ms: u32 = 500,
     wav_path: []const u8 = "/tmp/zhisper.wav",
     keep_wav_on_error: bool = true,
+    tray: bool = false,
     verbose: bool = false,
 };
 
@@ -249,8 +250,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8, cli: CliOverri
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
     .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code" } },
-    .{ .name = "audio", .keys = &.{ "device" } },
-    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "verbose" } },
+    .{ .name = "audio", .keys = &.{"device"} },
+    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "tray", "verbose" } },
 };
 
 fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
@@ -318,6 +319,24 @@ test "parseFileConfig reads example-shaped TOML" {
     try std.testing.expectEqual(@as(u16, 70), cfg.hotkey.key_code);
     try std.testing.expectEqualStrings("toggle", cfg.hotkey.mode);
     try std.testing.expectEqual(@as(u32, 800), cfg.daemon.min_duration_ms);
+}
+
+test "daemon tray defaults off and parses opt-in" {
+    try std.testing.expect(!defaultConfig().daemon.tray);
+
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[daemon]
+        \\tray = true
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-tray.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-tray.toml") catch {};
+
+    const cfg = try parseFileConfig(gpa, io, "cfg-tray.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expect(cfg.daemon.tray);
 }
 
 test "parseFileConfig rejects unknown fields" {
