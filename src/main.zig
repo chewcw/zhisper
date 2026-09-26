@@ -124,6 +124,12 @@ fn overlayStateFor(recording: bool, has_pending: bool) zhisper.overlay.State {
     return .idle;
 }
 
+fn trayStateFor(recording: bool, active: bool, has_pending: bool) zhisper.tray.State {
+    if (recording) return .recording;
+    if (active or has_pending) return .working;
+    return .idle;
+}
+
 var stop_requested: std.atomic.Value(bool) = .init(false);
 
 fn onSignal(_: std.posix.SIG) callconv(.c) void {
@@ -139,6 +145,8 @@ const WorkQueue = struct {
     mutex: std.Io.Mutex = .init,
     // True when pending_path holds a clip the worker has not picked up yet.
     has_pending: bool = false,
+    // True from dequeue through transcription and injection completion.
+    active: bool = false,
     // Fixed buffer for the waiting clip's path. 512 covers OS config-dir
     // paths plus the per-recording counter suffix from uniqueWavPath.
     pending_path: [512]u8 = undefined,
@@ -165,7 +173,13 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
         const len = q.pending_len;
         @memcpy(path_buf[0..len], q.pending_path[0..len]);
         q.has_pending = false;
+        q.active = true;
         q.mutex.unlock(io);
+        defer {
+            q.mutex.lockUncancelable(io);
+            q.active = false;
+            q.mutex.unlock(io);
+        }
         const wav_path = path_buf[0..len];
         const t_cfg = buildTranscribeConfig(cfg, api_key);
         const transcribe_log = std.log.scoped(.transcribe);
@@ -472,6 +486,14 @@ test "cancel while idle is ignored" {
     try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .cancel_pressed));
     var t = LoopState{ .mode = .toggle };
     try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&t, .cancel_pressed));
+}
+
+test "tray state covers recording, active work, pending work, and idle" {
+    try std.testing.expectEqual(zhisper.tray.State.recording, trayStateFor(true, false, false));
+    try std.testing.expectEqual(zhisper.tray.State.recording, trayStateFor(true, true, true));
+    try std.testing.expectEqual(zhisper.tray.State.working, trayStateFor(false, true, false));
+    try std.testing.expectEqual(zhisper.tray.State.working, trayStateFor(false, false, true));
+    try std.testing.expectEqual(zhisper.tray.State.idle, trayStateFor(false, false, false));
 }
 
 test "overlay state derives from recording then pending" {
