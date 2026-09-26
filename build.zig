@@ -53,6 +53,10 @@ pub fn build(b: *std.Build) void {
     // (the C sources still compile once per target — first build is slow).
     const sdl_dep = b.dependency("sdl3", .{ .target = target, .optimize = optimize });
     mod.addImport("sdl3", sdl_dep.module("sdl3"));
+    if (target.result.os.tag == .linux) {
+        const zstbi_dep = b.dependency("zstbi", .{ .target = target, .optimize = optimize });
+        mod.addImport("zstbi", zstbi_dep.module("root"));
+    }
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business

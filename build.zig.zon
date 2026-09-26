@@ -44,11 +44,16 @@
             .url = "git+https://codeberg.org/7Games/zig-sdl3?ref=v0.2.2#83c694024f23cbacfa36fcd8fca1c57d4957203e",
             .hash = "sdl3-0.2.2-NmT1Q-2jKQBa4uSXUwuVwdmXpXe-eYwim7Wkyx531v6O",
         },
+        .zstbi = .{
+            .url = "git+https://github.com/zig-gamedev/zstbi#3813f5f113b26f644cfa01a30155cc76b3526e91",
+            .hash = "zstbi-0.11.0-dev-L0Ea_3GWBwAh7m54XX055vwLKPTPij5hyqyeq92MXPE2",
+        },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "icon",
         // For example...
         //"LICENSE",
         //"README.md",
