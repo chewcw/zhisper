@@ -49,4 +49,7 @@ test {
     if (builtin.os.tag == .windows) {
         std.testing.refAllDecls(@import("tray_windows.zig"));
     }
+    if (builtin.os.tag == .macos) {
+        std.testing.refAllDecls(@import("tray_macos.zig"));
+    }
 }

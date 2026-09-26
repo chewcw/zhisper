@@ -66,6 +66,14 @@ pub fn build(b: *std.Build) void {
         mod.linkSystemLibrary("ole32", .{});
         mod.linkSystemLibrary("windowscodecs", .{});
     }
+    if (target.result.os.tag == .macos) {
+        mod.addCSourceFile(.{
+            .file = b.path("src/tray_macos.m"),
+            .flags = &.{"-fobjc-arc"},
+        });
+        mod.linkFramework("AppKit", .{});
+        mod.linkFramework("Foundation", .{});
+    }
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
