@@ -9,6 +9,7 @@ pub const transcribe = @import("transcribe.zig");
 pub const hotkey = @import("hotkey.zig");
 pub const hotkey_types = @import("hotkey_types.zig");
 pub const inject = @import("inject.zig");
+pub const inject_types = @import("inject_types.zig");
 pub const overlay = @import("overlay.zig");
 pub const overlay_types = @import("overlay_types.zig");
 pub const tray = @import("tray.zig");
@@ -25,6 +26,7 @@ test {
     std.testing.refAllDecls(@import("hotkey_stub.zig"));
     std.testing.refAllDecls(@import("inject.zig"));
     std.testing.refAllDecls(@import("inject_stub.zig"));
+    std.testing.refAllDecls(@import("inject_types.zig"));
     std.testing.refAllDecls(@import("overlay_types.zig"));
     std.testing.refAllDecls(@import("overlay_stub.zig"));
     std.testing.refAllDecls(@import("overlay.zig"));
