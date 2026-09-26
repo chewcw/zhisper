@@ -33,10 +33,6 @@ test {
     std.testing.refAllDecls(@import("tray.zig"));
     std.testing.refAllDecls(@import("tray_types.zig"));
     std.testing.refAllDecls(@import("tray_stub.zig"));
-    std.testing.refAllDecls(@import("hotkey_windows.zig"));
-    std.testing.refAllDecls(@import("hotkey_macos.zig"));
-    std.testing.refAllDecls(@import("inject_windows.zig"));
-    std.testing.refAllDecls(@import("inject_macos.zig"));
     std.testing.refAllDecls(@import("config.zig"));
     std.testing.refAllDecls(@import("log.zig"));
     std.testing.refAllDecls(@import("clipboard.zig"));
@@ -50,8 +46,16 @@ test {
     }
     if (builtin.os.tag == .windows) {
         std.testing.refAllDecls(@import("tray_windows.zig"));
+        // These @cImport platform headers (windows.h), which cannot be
+        // analyzed on a Linux test build. Their coverage comes from
+        // `zig build -Dtarget=x86_64-windows` plus on-device testing.
+        std.testing.refAllDecls(@import("hotkey_windows.zig"));
+        std.testing.refAllDecls(@import("inject_windows.zig"));
     }
     if (builtin.os.tag == .macos) {
         std.testing.refAllDecls(@import("tray_macos.zig"));
+        // Same reason as the Windows block above (ApplicationServices).
+        std.testing.refAllDecls(@import("hotkey_macos.zig"));
+        std.testing.refAllDecls(@import("inject_macos.zig"));
     }
 }
