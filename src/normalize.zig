@@ -360,3 +360,48 @@ test "resolveConfig treats an empty override as 'use the preset'" {
 
     try std.testing.expectError(error.MissingApiKey, resolveConfig(null, null, ""));
 }
+
+test "live normalize against published S1-mini examples (opt-in)" {
+    if (std.c.getenv("NORMALIZE_LIVE") == null) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const key = std.c.getenv("GROQ_API_KEY") orelse return error.SkipZigTest;
+    const cfg = try resolveConfig(null, null, std.mem.span(key));
+
+    // Published S1-mini outputs, for the same inputs. S1-mini is Superwhisper's
+    // 596M text normalizer fine-tuned from Qwen3-0.6B for exactly this task;
+    // these are its model-card outputs and act as the quality bar.
+    const cases = [_]struct { raw: []const u8, want: []const u8 }{
+        .{
+            .raw = "so um i need to like send the the report by uh friday no wait make that thursday",
+            .want = "I need to send the report by Thursday.",
+        },
+        .{ .raw = "i think the answer is forty two no sorry forty three", .want = "I think the answer is 43." },
+        .{
+            .raw = "let's meet at half past two tomorrow uh actually make it three fifteen p m",
+            .want = "Let's meet at 3:15pm tomorrow.",
+        },
+        .{
+            .raw = "the invoice came to twenty three thousand four hundred and fifty dollars and it's due on march third twenty twenty six",
+            .want = "The invoice came to $23,450, and it's due on March 3, 2026.",
+        },
+        .{ .raw = "send it to support at superwhisper dot com", .want = "Send it to support@superwhisper.com." },
+        // S1-mini returns an empty string for filler-only input.
+        .{ .raw = "um", .want = "" },
+    };
+
+    var exact: usize = 0;
+    for (cases) |c| {
+        const got = normalizeWithConfig(io, gpa, c.raw, cfg) catch |err| {
+            std.debug.print("normalize error: {s}\n", .{@errorName(err)});
+            continue;
+        };
+        defer gpa.free(got);
+        if (std.mem.eql(u8, got, c.want)) exact += 1;
+        std.debug.print("raw : {s}\nwant: {s}\ngot : {s}\n\n", .{ c.raw, c.want, got });
+    }
+    // Reported, never asserted: a hosted model legitimately differs in
+    // punctuation and phrasing, so a hard assertion here would be flaky.
+    // The count is for a human to judge, not for the build to gate on.
+    std.debug.print("exact matches: {d}/{d}\n", .{ exact, cases.len });
+}
