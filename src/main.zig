@@ -188,7 +188,14 @@ const WorkQueue = struct {
     shutdown: bool = false,
 };
 
-fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, api_key: []const u8, q: *WorkQueue) void {
+fn workerMain(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    cfg: zhisper.config.Config,
+    api_key: []const u8,
+    q: *WorkQueue,
+    normalize_flag: *std.atomic.Value(bool),
+) void {
     var path_buf: [512]u8 = undefined;
     while (true) {
         q.mutex.lockUncancelable(io);
@@ -220,8 +227,24 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
             continue;
         };
         defer gpa.free(text);
+        // Normalization is best-effort and never blocks the dictation: every
+        // failure path keeps the raw transcript. An empty raw transcript is
+        // skipped entirely so silence does not cost a network round trip.
+        var final_text = text;
+        if (normalize_flag.load(.monotonic) and text.len > 0) {
+            const normalize_log = std.log.scoped(.normalize);
+            if (zhisper.normalize.resolveConfig(cfg.normalize.model, "", api_key)) |n_cfg| {
+                if (zhisper.normalize.normalizeWithConfig(io, gpa, text, n_cfg)) |clean| {
+                    final_text = clean;
+                } else |err| {
+                    normalize_log.warn("normalize failed, using raw transcript: {s}", .{@errorName(err)});
+                }
+            } else |err| {
+                normalize_log.warn("normalize config invalid, using raw transcript: {s}", .{@errorName(err)});
+            }
+        }
         const inject_log = std.log.scoped(.inject);
-        const n = zhisper.inject.typeText(text, io) catch |err| {
+        const n = zhisper.inject.typeText(final_text, io) catch |err| {
             inject_log.debug("inject failed: {s}", .{@errorName(err)});
             continue;
         };
@@ -234,6 +257,9 @@ fn workerMain(io: std.Io, gpa: std.mem.Allocator, cfg: zhisper.config.Config, ap
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
+    // Thread-safe and leak-checked in Debug. Used by the config-reload path,
+    // which runs repeatedly and must not accumulate on the arena.
+    const gpa = init.gpa;
     zhisper.log.init();
     // CLI/config --verbose also enables stdout logs (env already checked in init).
 
@@ -373,7 +399,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var queue = WorkQueue{};
-    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue });
+    // Seeded from the config file's value at startup; the poll loop below
+    // keeps it in sync.
+    var normalize_flag = std.atomic.Value(bool).init(cfg.normalize.enabled);
+    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue, &normalize_flag });
+
+    // WHY: the config is loaded once, but `normalize.enabled` is the escape
+    // hatch a user reaches for the moment normalization mangles their text.
+    // It must be flippable without a restart. Only that one key is re-read —
+    // see config.loadNormalizeEnabled for why a full reload would mislead.
+    var cfg_signature: ?std.Io.File.Stat = zhisper.config.fileSignature(io, cfg_path);
+    var cfg_checked_at = std.Io.Timestamp.now(io, .awake);
+    const cfg_poll_interval_ns: i96 = 1_000_000_000; // once a second
 
     var loop_state = LoopState{ .mode = mode };
     var start_ts: std.Io.Clock.Timestamp = undefined;
@@ -382,6 +419,29 @@ pub fn main(init: std.process.Init) !void {
     daemon_log.info("listening (mode={s}, key={d}, cancel={d})", .{ cfg.hotkey.mode, hotkey_code, zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0 });
 
     while (!stop_requested.load(.monotonic)) {
+        const cfg_now = std.Io.Timestamp.now(io, .awake);
+        if (cfg_now.durationTo(cfg_checked_at).nanoseconds >= cfg_poll_interval_ns) {
+            cfg_checked_at = cfg_now;
+            const signature = zhisper.config.fileSignature(io, cfg_path);
+            const changed = blk: {
+                const old = cfg_signature;
+                if (old == null and signature == null) break :blk false;
+                if (old == null or signature == null) break :blk true;
+                break :blk old.?.mtime.nanoseconds != signature.?.mtime.nanoseconds or
+                    old.?.size != signature.?.size;
+            };
+            if (changed) {
+                cfg_signature = signature;
+                // Uses init.gpa, not the arena: this runs repeatedly, and a
+                // typo in the config must not grow the arena or kill the daemon.
+                if (zhisper.config.loadNormalizeEnabled(gpa, io, cfg_path)) |enabled| {
+                    normalize_flag.store(enabled, .monotonic);
+                    daemon_log.info("normalize.enabled = {}", .{enabled});
+                } else |err| {
+                    daemon_log.warn("config reload failed, keeping normalize.enabled: {s}", .{@errorName(err)});
+                }
+            }
+        }
         if (tray_live) zhisper.tray.poll(io);
         const ev = zhisper.hotkey.pollEvent();
         if (ev) |e| {
