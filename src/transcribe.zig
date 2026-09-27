@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("log.zig");
 
 pub const default_model = "whisper-large-v3-turbo";
 pub const default_prompt: []const u8 = "";
@@ -108,6 +109,14 @@ fn apiKey() ?[]const u8 {
     return std.mem.span(raw);
 }
 
+/// Metadata for the success line of one transcription request. WHY lengths
+/// and not content: the prompt is user text and the WAV is binary, and a
+/// verbose line must never carry either. The model name is safe — it comes
+/// from config, not from the user.
+pub fn requestDetail(buf: []u8, model: []const u8, req_len: usize, wav_len: usize, prompt_len: usize) std.fmt.BufPrintError![]const u8 {
+    return std.fmt.bufPrint(buf, "model=\"{s}\" req={d}B (wav={d}B prompt={d}B)", .{ model, req_len, wav_len, prompt_len });
+}
+
 /// Canonical HTTP path: OpenAI-compatible multipart POST, Bearer auth,
 /// {"text": ...} response. Non-200 maps to error.UpstreamRejected (status code
 /// is the caller's to log; never log key or body here).
@@ -118,6 +127,14 @@ pub fn transcribeWithConfig(io: std.Io, gpa: std.mem.Allocator, wav_path: []cons
     const boundary = "----zhisperBoundary7MA4YWxkTrZu0gW";
     const body = try buildMultipart(gpa, boundary, wav, "audio.wav", cfg.model, cfg.prompt);
     defer gpa.free(body);
+
+    // Started after the multipart build, so the reported latency is the HTTP
+    // round trip and not the local copy. detail_buf is borrowed by the trace
+    // and must outlive it — it is declared before `trace` and lives to the
+    // end of this function.
+    var detail_buf: [160]u8 = undefined;
+    const detail = requestDetail(&detail_buf, cfg.model, body.len, wav.len, cfg.prompt.len) catch "detail unavailable";
+    const trace = log.ApiTrace.begin(io, "transcribe", cfg.base_url, detail);
 
     const auth = try std.fmt.allocPrint(gpa, "Bearer {s}", .{cfg.api_key});
     defer gpa.free(auth);
@@ -142,11 +159,24 @@ pub fn transcribeWithConfig(io: std.Io, gpa: std.mem.Allocator, wav_path: []cons
         },
         .payload = body,
         .response_writer = &resp.writer,
-    }) catch return error.HttpError;
-    if (res.status != .ok) return error.UpstreamRejected;
+    }) catch |err| {
+        trace.failed(err);
+        return error.HttpError;
+    };
+    if (res.status != .ok) {
+        // Logged before returning: this body is the provider's explanation
+        // ("Invalid API Key", "audio file too long") and the `defer` above
+        // would otherwise discard it unread.
+        trace.rejected(@intFromEnum(res.status), resp.writer.buffered());
+        return error.UpstreamRejected;
+    }
 
     const json_body = resp.writer.buffered();
-    if (json_body.len > response_cap) return error.ResponseTooLarge;
+    if (json_body.len > response_cap) {
+        trace.tooLarge(@intFromEnum(res.status), json_body.len);
+        return error.ResponseTooLarge;
+    }
+    trace.ok(@intFromEnum(res.status), json_body.len);
     return try parseText(gpa, json_body);
 }
 
@@ -258,6 +288,29 @@ test "resolveConfig uses preset unless overridden, rejects missing key" {
     try std.testing.expectEqualStrings("http://localhost:8080/x", over.base_url);
     try std.testing.expectError(error.MissingApiKey, resolveConfig(groq, null, null, null));
     try std.testing.expectError(error.MissingApiKey, resolveConfig(groq, "", null, null));
+}
+
+test "requestDetail reports sizes without any payload content" {
+    var buf: [160]u8 = undefined;
+    const got = try requestDetail(&buf, "whisper-large-v3-turbo", 123800, 123456, 120);
+    try std.testing.expectEqualStrings("model=\"whisper-large-v3-turbo\" req=123800B (wav=123456B prompt=120B)", got);
+}
+
+test "failed transcription exercises the trace without crashing or leaking" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const zlog = @import("log.zig");
+    // Turn the gate on so the warn path actually formats; the emitted text
+    // is asserted by formatApiLine in log.zig, not here.
+    zlog.setEnabled(true);
+    defer zlog.setEnabled(false);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "trace-tiny.wav", .data = "RIFF" });
+    defer std.Io.Dir.cwd().deleteFile(io, "trace-tiny.wav") catch {};
+    const cfg: Config = .{ .base_url = "http://127.0.0.1:9/audio/transcriptions", .model = "m", .api_key = "dummy-key" };
+    const err = transcribeWithConfig(io, gpa, "trace-tiny.wav", cfg) catch |e| e;
+    // The discard port refuses the connection, so the fetch fails before a
+    // status exists: this is the `failed` path. The error set is unchanged.
+    try std.testing.expect(err == error.HttpError or err == error.UpstreamRejected);
 }
 
 test "transcribeWithConfig against discard port fails without network" {
