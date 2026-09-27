@@ -4,6 +4,9 @@ const types = @import("inject_types.zig");
 
 pub const InjectOptions = types.InjectOptions;
 pub const TrailingNewline = types.TrailingNewline;
+// Re-exported so main.zig's clipboard branch can apply the same trailing
+// newline rule the platform emitters apply, instead of reimplementing it.
+pub const trailingCut = types.trailingCut;
 
 const impl = if (builtin.is_test)
     @import("inject_stub.zig")

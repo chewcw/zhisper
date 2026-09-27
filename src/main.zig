@@ -218,6 +218,9 @@ const WorkQueue = struct {
     pending_path: [512]u8 = undefined,
     // Valid bytes in pending_path (paths are not NUL-terminated here).
     pending_len: usize = 0,
+    // Output target of the waiting clip, written with pending_path under the
+    // same lock so the worker can never see a path and the wrong sink.
+    pending_sink: Sink = .typing,
     // Set once by main on SIGINT/SIGTERM. Worker drains at most the active
     // plus one waiting job ("finish the sentence"), then exits.
     shutdown: bool = false,
@@ -230,6 +233,8 @@ fn workerMain(
     api_key: []const u8,
     q: *WorkQueue,
     normalize_flag: *std.atomic.Value(bool),
+    clipboard_state: zhisper.clipboard.Clipboard,
+    trailing_newline: zhisper.inject.TrailingNewline,
 ) void {
     var path_buf: [512]u8 = undefined;
     while (true) {
@@ -245,6 +250,8 @@ fn workerMain(
         }
         const len = q.pending_len;
         @memcpy(path_buf[0..len], q.pending_path[0..len]);
+        // Copied under the lock, alongside the path it belongs to.
+        const sink = q.pending_sink;
         q.has_pending = false;
         q.active = true;
         q.mutex.unlock(io);
@@ -279,11 +286,33 @@ fn workerMain(
             }
         }
         const inject_log = std.log.scoped(.inject);
-        const n = zhisper.inject.typeText(final_text, io) catch |err| {
-            inject_log.debug("inject failed: {s}", .{@errorName(err)});
-            continue;
-        };
-        inject_log.debug("typed {d} keystrokes", .{n});
+        switch (sink) {
+            .typing => {
+                const n = zhisper.inject.typeText(final_text, io) catch |err| {
+                    inject_log.debug("inject failed: {s}", .{@errorName(err)});
+                    continue;
+                };
+                inject_log.debug("typed {d} keystrokes", .{n});
+            },
+            .clipboard => {
+                // Reuse the injection newline rule rather than a second one:
+                // trailingCut is the same pure helper every platform emitter
+                // uses, so daemon.trailing_newline means the same thing here.
+                const cut = zhisper.inject.trailingCut(final_text, trailing_newline);
+                const payload = final_text[0 .. final_text.len - cut];
+                if (payload.len == 0) {
+                    // Deliberately not `continue`: that would skip the WAV
+                    // delete below and leak a file per misfire. An empty
+                    // transcript must never clobber what the user has copied.
+                    inject_log.debug("empty transcript, clipboard left untouched", .{});
+                } else {
+                    zhisper.clipboard.paste(payload, io, clipboard_state) catch |err| {
+                        inject_log.debug("clipboard write failed: {s}", .{@errorName(err)});
+                    };
+                    inject_log.debug("clipboard filled with {d} bytes", .{payload.len});
+                }
+            },
+        }
 
         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
     }
@@ -355,12 +384,32 @@ pub fn main(init: std.process.Init) !void {
         std.log.err("hotkey.key_code must be set to a real key code (use -1 to disable the cancel key, not the hotkey)", .{});
         std.process.exit(1);
     };
+    // Clipboard capture gate. A zero code means "off", so the gate and the OS
+    // seam agree on one value: when no clipboard tool exists we never hand the
+    // key to the seam at all, so it can never emit an event we cannot honour.
+    // The probe is skipped entirely when the key is unconfigured, so a daemon
+    // that does not use this feature never spawns a `which` subprocess.
+    var clipboard_state: zhisper.clipboard.Clipboard = .{ .available = false, .tool = null };
+    const clipboard_code: u16 = if (zhisper.config.keyCodeOf(cfg.hotkey.clipboard_key_code)) |code| blk: {
+        clipboard_state = zhisper.clipboard.check(io);
+        if (!clipboard_state.available) {
+            // .err, not .warn and not log.warn(): only .err bypasses the
+            // ZHISPER_DEBUG gate, and a hotkey that silently never fires reads
+            // to the user as a broken daemon or a broken keyboard. inject_linux
+            // uses the silent helper for its own clipboard degradation, which
+            // is a different failure — that one announces itself in the text.
+            daemon_log.err("clipboard_key_code={d} set but no clipboard tool found — clipboard capture disabled, use key_code instead", .{code});
+            break :blk 0;
+        }
+        break :blk code;
+    } else 0;
     zhisper.hotkey.setup(.{
         .key_code = hotkey_code,
         .mode = mode,
         .evdev = cfg.hotkey.evdev,
         .evdev_name = cfg.hotkey.evdev_name,
         .cancel_key_code = zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
+        .clipboard_key_code = clipboard_code,
     }) catch |err| {
         std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -437,7 +486,7 @@ pub fn main(init: std.process.Init) !void {
     // Seeded from the config file's value at startup; the poll loop below
     // keeps it in sync.
     var normalize_flag = std.atomic.Value(bool).init(cfg.normalize.enabled);
-    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue, &normalize_flag });
+    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue, &normalize_flag, clipboard_state, trailing_newline });
 
     // WHY: the config is loaded once, but `normalize.enabled` is the escape
     // hatch a user reaches for the moment normalization mangles their text.
@@ -451,7 +500,8 @@ pub fn main(init: std.process.Init) !void {
     var start_ts: std.Io.Clock.Timestamp = undefined;
     var have_start = false;
     var wav_counter: u32 = 0;
-    daemon_log.info("listening (mode={s}, key={d}, cancel={d})", .{ cfg.hotkey.mode, hotkey_code, zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0 });
+    const clipboard_label: []const u8 = if (clipboard_code == 0) "off" else "on";
+    daemon_log.info("listening (mode={s}, key={d}, cancel={d}, clipboard={s})", .{ cfg.hotkey.mode, hotkey_code, zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0, clipboard_label });
 
     while (!stop_requested.load(.monotonic)) {
         const cfg_now = std.Io.Timestamp.now(io, .awake);
@@ -539,6 +589,7 @@ pub fn main(init: std.process.Init) !void {
                     const copy_len = @min(wav_path.len, queue.pending_path.len);
                     @memcpy(queue.pending_path[0..copy_len], wav_path[0..copy_len]);
                     queue.pending_len = copy_len;
+                    queue.pending_sink = loop_state.sink;
                     queue.has_pending = true;
                     queue.mutex.unlock(io);
                 },
@@ -813,6 +864,13 @@ test "a clipboard recording uses the same overlay and tray indicators" {
     _ = handleHotkeyEvent(&s, .clipboard_pressed);
     try std.testing.expectEqual(zhisper.overlay.State.recording, overlayStateFor(s.recording, false));
     try std.testing.expectEqual(zhisper.tray.State.recording, trayStateFor(s.recording, false, false));
+}
+
+test "the inject facade re-exports trailingCut for the clipboard branch" {
+    // The clipboard path reuses the injection newline rule instead of
+    // inventing a second one, so the two sinks cannot disagree.
+    try std.testing.expectEqual(@as(usize, 1), zhisper.inject.trailingCut("hi\n", .strip));
+    try std.testing.expectEqual(@as(usize, 0), zhisper.inject.trailingCut("hi\n", .send));
 }
 
 test "std_options routes through env-gated logFn" {
