@@ -15,6 +15,7 @@ prompt = ""
 #   A        30     0      0x41
 #   C        46     8      0x43
 #   F9       67     0x78   0x78
+#   F11      87     0x6A   0x7A
 #   Return   28     36     0x0D
 #   Tab      15     48     0x09
 # Use -1 to disable a key. 0 is a real key (macOS 'A'), not "disabled".
@@ -22,6 +23,9 @@ prompt = ""
 key_code = 67     # OS-native; -1 disables. Linux KEY_F9=67 / macOS kVK_F9=0x78 / Windows VK_F9=0x78
 mode = "hold"     # hold | toggle
 cancel_key_code = 46  # OS-native; -1 disables. Linux KEY_C=46 / macOS kVK_C=8 / Windows VK_C=0x43
+clipboard_key_code = -1  # OS-native; -1 or absent = off. Linux KEY_F11=87 / macOS kVK_F11=0x6A /
+                        # Windows VK_F11=0x7A. A recording started with this key puts the
+                        # transcript in the clipboard instead of typing it anywhere.
 evdev = ""        # Linux only, explicit /dev/input/eventN (empty = off, wins over evdev_name)
 evdev_name = ""   # Linux only, device name match e.g. "kanata" (empty = off, wins over auto-scan)
 

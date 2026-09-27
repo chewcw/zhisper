@@ -36,6 +36,11 @@ pub const HotkeyCfg = struct {
     evdev: []const u8 = "",
     evdev_name: []const u8 = "",
     cancel_key_code: ?i16 = null,
+    /// OS-native key code for the clipboard-capture key, in the same encoding
+    /// as key_code. null (absent) and any negative value both mean the feature
+    /// is off, which is the default. Recording started with this key writes the
+    /// transcript to the system clipboard instead of typing it.
+    clipboard_key_code: ?i16 = null,
 };
 
 /// Default hotkey: KEY_F9 on Linux.
@@ -191,6 +196,7 @@ pub const EnvValues = struct {
     evdev: ?[]const u8 = null,
     evdev_name: ?[]const u8 = null,
     cancel_key_code: ?i16 = null,
+    clipboard_key_code: ?i16 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -209,6 +215,7 @@ pub fn applyEnv(cfg: Config, env: EnvValues) Config {
     if (env.evdev) |v| out.hotkey.evdev = v;
     if (env.evdev_name) |v| out.hotkey.evdev_name = v;
     if (env.cancel_key_code) |v| out.hotkey.cancel_key_code = v;
+    if (env.clipboard_key_code) |v| out.hotkey.clipboard_key_code = v;
     if (env.device) |v| out.audio.device = v;
     if (env.min_duration_ms) |v| out.daemon.min_duration_ms = v;
     if (env.wav_path) |v| out.daemon.wav_path = v;
@@ -252,6 +259,15 @@ pub fn validate(cfg: Config) !void {
     const hotkey = keyCodeOf(cfg.hotkey.key_code) orelse return error.InvalidKeyCode;
     if (keyCodeOf(cfg.hotkey.cancel_key_code)) |cancel| {
         if (cancel == hotkey) return error.CancelEqualsHotkey;
+    }
+    // A clipboard key bound to either existing key would make one physical key
+    // mean two different things, and the decode order in the OS seam would
+    // silently pick a winner.
+    if (keyCodeOf(cfg.hotkey.clipboard_key_code)) |clip| {
+        if (clip == hotkey) return error.ClipboardKeyCollision;
+        if (keyCodeOf(cfg.hotkey.cancel_key_code)) |cancel| {
+            if (clip == cancel) return error.ClipboardKeyCollision;
+        }
     }
     if (cfg.daemon.min_duration_ms == 0) return error.InvalidDuration;
 
@@ -308,6 +324,7 @@ pub fn readEnvValues() EnvValues {
         .evdev = envStr("ZHISPER_EVDEV"),
         .evdev_name = envStr("ZHISPER_EVDEV_NAME"),
         .cancel_key_code = envI16("ZHISPER_CANCEL_KEY_CODE"),
+        .clipboard_key_code = envI16("ZHISPER_CLIPBOARD_KEY_CODE"),
         .device = envStr("ZHISPER_DEVICE"),
         .min_duration_ms = envU32("ZHISPER_MIN_DURATION_MS"),
         .wav_path = envStr("ZHISPER_WAV_PATH"),
@@ -365,7 +382,7 @@ pub fn fileSignature(io: std.Io, path: []const u8) ?std.Io.File.Stat {
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
     .{ .name = "normalize", .keys = &.{ "enabled", "model", "base_url", "styling", "structure", "context" } },
-    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code" } },
+    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "verbose" } },
 };
@@ -404,7 +421,8 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
             // 70000 in the file would panic the daemon at startup. This has to
             // run *before* the `ok` check below, which skips known keys.
             if (std.mem.eql(u8, "key_code", entry.key_ptr.*) or
-                std.mem.eql(u8, "cancel_key_code", entry.key_ptr.*))
+                std.mem.eql(u8, "cancel_key_code", entry.key_ptr.*) or
+                std.mem.eql(u8, "clipboard_key_code", entry.key_ptr.*))
             {
                 if (entry.value_ptr.* == .integer) {
                     const v = entry.value_ptr.integer;
@@ -731,4 +749,67 @@ test "loadNormalizeEnabled ignores unrelated keys" {
 
 test "fileSignature returns null for an absent path" {
     try std.testing.expect(fileSignature(std.testing.io, "cfg-absent-sig.toml") == null);
+}
+
+test "clipboard_key_code is off by default and defaultConfig leaves it unset" {
+    try std.testing.expect(defaultConfig().hotkey.clipboard_key_code == null);
+}
+
+test "parseFileConfig reads clipboard_key_code from the hotkey section" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\clipboard_key_code = 87
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-clip.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-clip.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-clip.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectEqual(@as(?i16, 87), cfg.hotkey.clipboard_key_code);
+}
+
+test "an out-of-range clipboard_key_code errors instead of panicking the parser" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\clipboard_key_code = 70000
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-clip-big.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-clip-big.toml") catch {};
+    // The vendored toml parser assigns integers with a safety-checked @intCast,
+    // so without the range check in checkUnknownFields this would panic the
+    // daemon at startup.
+    try std.testing.expectError(error.InvalidKeyCode, parseFileConfig(gpa, io, "cfg-clip-big.toml"));
+}
+
+test "validate accepts a clipboard key distinct from both other keys" {
+    var cfg = defaultConfig();
+    cfg.hotkey.clipboard_key_code = 87;
+    try validate(cfg);
+}
+
+test "validate rejects a clipboard key colliding with the hotkey or the cancel key" {
+    var a = defaultConfig();
+    a.hotkey.clipboard_key_code = a.hotkey.key_code;
+    try std.testing.expectError(error.ClipboardKeyCollision, validate(a));
+    var b = defaultConfig();
+    b.hotkey.clipboard_key_code = b.hotkey.cancel_key_code;
+    try std.testing.expectError(error.ClipboardKeyCollision, validate(b));
+}
+
+test "a negative clipboard_key_code disables the feature rather than erroring" {
+    var cfg = defaultConfig();
+    cfg.hotkey.clipboard_key_code = -1;
+    try validate(cfg);
+    try std.testing.expect(keyCodeOf(cfg.hotkey.clipboard_key_code) == null);
+}
+
+test "clipboard_key_code overlays from the env struct" {
+    const cfg = defaultConfig();
+    const out = applyEnv(cfg, .{ .clipboard_key_code = 87 });
+    try std.testing.expectEqual(@as(?i16, 87), out.hotkey.clipboard_key_code);
 }
