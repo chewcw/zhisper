@@ -24,6 +24,7 @@ var cfg: types.HotkeyConfig = .{ .key_code = 0 };
 /// callback runs on, so plain bools are correct here.
 var hotkey_down = false;
 var cancel_down = false;
+var clipboard_down = false;
 var hook: c.HHOOK = null;
 var thread: ?std.Thread = null;
 var status: std.atomic.Value(u8) = .init(status_pending);
@@ -52,6 +53,19 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                 } else if (hotkey_down) {
                     hotkey_down = false;
                     ring.push(.hotkey_released);
+                }
+            } else if (vk == cfg.clipboard_key_code) {
+                // Same reason hotkey_down and cancel_down exist:
+                // KBDLLHOOKSTRUCT has no repeat flag, so a held key streams
+                // key-down callbacks and each transition must be reported once.
+                if (is_down) {
+                    if (!clipboard_down) {
+                        clipboard_down = true;
+                        ring.push(.clipboard_pressed);
+                    }
+                } else if (clipboard_down) {
+                    clipboard_down = false;
+                    ring.push(.clipboard_released);
                 }
             } else if (vk == cfg.cancel_key_code) {
                 if (is_down) {
@@ -93,6 +107,7 @@ pub fn setup(config: types.HotkeyConfig) !void {
     ring = types.EventRing.init();
     hotkey_down = false;
     cancel_down = false;
+    clipboard_down = false;
     status.store(status_pending, .release);
     thread_id.store(0, .release);
 
