@@ -432,7 +432,9 @@ pub fn main(init: std.process.Init) !void {
 
     while (!stop_requested.load(.monotonic)) {
         const cfg_now = std.Io.Timestamp.now(io, .awake);
-        if (cfg_now.durationTo(cfg_checked_at).nanoseconds >= cfg_poll_interval_ns) {
+        const since_check = cfg_checked_at.durationTo(cfg_now).nanoseconds;
+        if (since_check >= cfg_poll_interval_ns) {
+            daemon_log.debug("checking the config file stats", .{});
             cfg_checked_at = cfg_now;
             const signature = zhisper.config.fileSignature(io, cfg_path);
             const changed = blk: {
