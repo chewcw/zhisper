@@ -1,11 +1,24 @@
 const std = @import("std");
 const toml = @import("toml");
+const normalize = @import("normalize.zig");
 
 pub const TranscribeCfg = struct {
     provider: []const u8 = "groq",
     model: []const u8 = "",
     base_url: []const u8 = "",
     prompt: []const u8 = "",
+};
+
+/// Optional post-transcription cleanup. Ships disabled so upgrading zhisper
+/// never silently doubles dictation latency. The three axis strings are
+/// closed sets owned by src/normalize.zig; see the S1-mini model card for why
+/// untrained values degrade output.
+pub const NormalizeCfg = struct {
+    enabled: bool = false,
+    model: []const u8 = "",
+    styling: []const u8 = "semi-formal",
+    structure: []const u8 = "prose",
+    context: []const u8 = "general",
 };
 
 pub const HotkeyCfg = struct {
@@ -59,6 +72,7 @@ pub const DaemonCfg = struct {
 
 pub const Config = struct {
     transcribe: TranscribeCfg = .{},
+    normalize: NormalizeCfg = .{},
     hotkey: HotkeyCfg = .{},
     audio: AudioCfg = .{},
     daemon: DaemonCfg = .{},
@@ -125,6 +139,14 @@ pub fn dupeConfig(gpa: std.mem.Allocator, cfg: Config) !Config {
     errdefer gpa.free(out.transcribe.base_url);
     out.transcribe.prompt = try gpa.dupe(u8, cfg.transcribe.prompt);
     errdefer gpa.free(out.transcribe.prompt);
+    out.normalize.model = try gpa.dupe(u8, cfg.normalize.model);
+    errdefer gpa.free(out.normalize.model);
+    out.normalize.styling = try gpa.dupe(u8, cfg.normalize.styling);
+    errdefer gpa.free(out.normalize.styling);
+    out.normalize.structure = try gpa.dupe(u8, cfg.normalize.structure);
+    errdefer gpa.free(out.normalize.structure);
+    out.normalize.context = try gpa.dupe(u8, cfg.normalize.context);
+    errdefer gpa.free(out.normalize.context);
     out.hotkey.mode = try gpa.dupe(u8, cfg.hotkey.mode);
     errdefer gpa.free(out.hotkey.mode);
     out.hotkey.evdev = try gpa.dupe(u8, cfg.hotkey.evdev);
@@ -144,6 +166,10 @@ pub fn freeConfig(gpa: std.mem.Allocator, cfg: Config) void {
     gpa.free(cfg.transcribe.model);
     gpa.free(cfg.transcribe.base_url);
     gpa.free(cfg.transcribe.prompt);
+    gpa.free(cfg.normalize.model);
+    gpa.free(cfg.normalize.styling);
+    gpa.free(cfg.normalize.structure);
+    gpa.free(cfg.normalize.context);
     gpa.free(cfg.hotkey.mode);
     gpa.free(cfg.hotkey.evdev);
     gpa.free(cfg.hotkey.evdev_name);
@@ -224,6 +250,17 @@ pub fn validate(cfg: Config) !void {
         if (cancel == hotkey) return error.CancelEqualsHotkey;
     }
     if (cfg.daemon.min_duration_ms == 0) return error.InvalidDuration;
+
+    if (!isOneOf(cfg.normalize.styling, normalize.styling_values)) return error.InvalidStyling;
+    if (!isOneOf(cfg.normalize.structure, normalize.structure_values)) return error.InvalidStructure;
+    if (!isOneOf(cfg.normalize.context, normalize.context_values)) return error.InvalidContext;
+}
+
+fn isOneOf(v: []const u8, set: []const []const u8) bool {
+    for (set) |allowed| {
+        if (std.mem.eql(u8, v, allowed)) return true;
+    }
+    return false;
 }
 
 fn envStr(name: [*:0]const u8) ?[]const u8 {
@@ -295,10 +332,35 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, path: []const u8, cli: CliOverri
     return owned;
 }
 
+/// Reads ONLY `normalize.enabled`.
+///
+/// WHY this does not re-read the whole config: `load` feeds subsystems that
+/// are initialized once at startup, so a full reload would let a user edit
+/// `hotkey.key_code`, see the reload succeed, and observe no effect at all.
+/// Restricting the read to the one field that is actually applied removes
+/// that class of silent no-op. A missing file is a legitimate state (every
+/// key has a default) and yields false.
+pub fn loadNormalizeEnabled(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !bool {
+    const from_file = parseFileConfig(gpa, io, path) catch |e| switch (e) {
+        error.FileNotFound, error.NoDevice, error.NotDir => return false,
+        else => return e,
+    };
+    defer freeConfig(gpa, from_file);
+    return from_file.normalize.enabled;
+}
+
+/// Cheap change detector for the config file. Null means absent, which the
+/// caller must distinguish from "unchanged" — deleting and recreating the file
+/// is a real edit.
+pub fn fileSignature(io: std.Io, path: []const u8) ?std.Io.File.Stat {
+    return std.Io.Dir.cwd().statFile(io, path, .{}) catch null;
+}
+
 // Every TOML key the file is allowed to contain. checkUnknownFields is the
 // single owner of this list; the struct definitions above own the values.
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
+    .{ .name = "normalize", .keys = &.{ "enabled", "model", "styling", "structure", "context" } },
     .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "verbose" } },
@@ -572,4 +634,94 @@ test "parseFileConfig reads cancel_key_code" {
     const cfg = try parseFileConfig(gpa, io, "cfg-cancel.toml");
     defer freeConfig(gpa, cfg);
     try std.testing.expectEqual(@as(?i16, 48), cfg.hotkey.cancel_key_code);
+}
+
+test "normalize defaults to disabled with the trained axis values" {
+    const cfg = defaultConfig();
+    try std.testing.expect(!cfg.normalize.enabled);
+    try std.testing.expectEqualStrings("", cfg.normalize.model);
+    try std.testing.expectEqualStrings("semi-formal", cfg.normalize.styling);
+    try std.testing.expectEqualStrings("prose", cfg.normalize.structure);
+    try std.testing.expectEqualStrings("general", cfg.normalize.context);
+}
+
+test "parseFileConfig reads the normalize section" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[normalize]
+        \\enabled = true
+        \\model = "openai/gpt-oss-120b"
+        \\styling = "formal"
+        \\structure = "lists"
+        \\context = "email"
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-norm.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-norm.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-norm.toml");
+    defer freeConfig(gpa, cfg);
+    try validate(cfg);
+    try std.testing.expect(cfg.normalize.enabled);
+    try std.testing.expectEqualStrings("openai/gpt-oss-120b", cfg.normalize.model);
+    try std.testing.expectEqualStrings("formal", cfg.normalize.styling);
+    try std.testing.expectEqualStrings("lists", cfg.normalize.structure);
+    try std.testing.expectEqualStrings("email", cfg.normalize.context);
+}
+
+test "a file without a normalize section is valid and disabled" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc = "[hotkey]\nkey_code = 67\n";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-nonorm.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-nonorm.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-nonorm.toml");
+    defer freeConfig(gpa, cfg);
+    try validate(cfg);
+    try std.testing.expect(!cfg.normalize.enabled);
+}
+
+test "validate rejects normalize values outside the trained sets" {
+    var cfg = defaultConfig();
+    cfg.normalize.styling = "shouty";
+    try std.testing.expectError(error.InvalidStyling, validate(cfg));
+    cfg.normalize.styling = "semi-formal";
+    cfg.normalize.structure = "table";
+    try std.testing.expectError(error.InvalidStructure, validate(cfg));
+    cfg.normalize.structure = "prose";
+    cfg.normalize.context = "sms";
+    try std.testing.expectError(error.InvalidContext, validate(cfg));
+    cfg.normalize.context = "general";
+    try validate(cfg);
+}
+
+test "loadNormalizeEnabled reads the flag from a file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-reload-on.toml", .data = "[normalize]\nenabled = true\n" });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-reload-on.toml") catch {};
+    try std.testing.expect(try loadNormalizeEnabled(gpa, io, "cfg-reload-on.toml"));
+}
+
+test "loadNormalizeEnabled reports false for a missing file" {
+    try std.testing.expect(!try loadNormalizeEnabled(
+        std.testing.allocator,
+        std.testing.io,
+        "cfg-reload-absent.toml",
+    ));
+}
+
+test "loadNormalizeEnabled ignores unrelated keys" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    // A deliberately invalid hotkey mode: proves the reload reads only the
+    // normalize section and does not fail on a value it would never apply.
+    const doc = "[normalize]\nenabled = true\n[hotkey]\nmode = \"bogus\"\n";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-reload-ignore.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-reload-ignore.toml") catch {};
+    try std.testing.expect(try loadNormalizeEnabled(gpa, io, "cfg-reload-ignore.toml"));
+}
+
+test "fileSignature returns null for an absent path" {
+    try std.testing.expect(fileSignature(std.testing.io, "cfg-absent-sig.toml") == null);
 }

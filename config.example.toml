@@ -28,6 +28,21 @@ evdev_name = ""   # Linux only, device name match e.g. "kanata" (empty = off, wi
 [audio]
 device = ""       # empty = system default mic
 
+[normalize]
+# Optional second API call that rewrites the transcript into clean written
+# text: resolves self-corrections, normalizes spoken numbers/dates/emails,
+# and fixes punctuation. Costs one extra network round trip, so it is off by
+# default. This section is watched at runtime: editing `enabled` here takes
+# effect within a second, no restart needed. No new key — it reuses
+# GROQ_API_KEY / ZHISPER_API_KEY.
+enabled = false
+model = ""        # empty = preset default (openai/gpt-oss-20b)
+# The three axes below are closed sets. Values outside them degrade output,
+# because the prompt format was only trained on these combinations.
+styling = "semi-formal"  # casual | semi-casual | semi-formal | formal
+structure = "prose"      # prose | lists
+context = "general"      # general | email
+
 [daemon]
 min_duration_ms = 500
 wav_path = ""   # "" = platform temp directory. Set an explicit path to override.

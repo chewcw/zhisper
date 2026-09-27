@@ -19,9 +19,9 @@ pub const response_cap: usize = 1024 * 1024;
 /// on these combinations; values outside them degrade output quality. Kept in
 /// sync with the trained sets so the same config remains valid if the runtime
 /// is later swapped to a local S1-mini.
-pub const styling_values = [_][]const u8{ "casual", "semi-casual", "semi-formal", "formal" };
-pub const structure_values = [_][]const u8{ "prose", "lists" };
-pub const context_values = [_][]const u8{ "general", "email" };
+pub const styling_values: []const []const u8 = &.{ "casual", "semi-casual", "semi-formal", "formal" };
+pub const structure_values: []const []const u8 = &.{ "prose", "lists" };
+pub const context_values: []const []const u8 = &.{ "general", "email" };
 
 pub const Config = struct {
     base_url: []const u8,
