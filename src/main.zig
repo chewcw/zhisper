@@ -117,11 +117,29 @@ fn resolveConfigPath(gpa: std.mem.Allocator) ![]u8 {
 
 const Action = enum { start, stop, ignore, cancel };
 
+/// Where a finished transcript goes. Chosen when a recording starts, carried
+/// with the job to the worker, and never changed mid-flight — a clipboard
+/// recording can still be transcribing while a dictation recording is queued
+/// behind it, so this is per-job state and never a global mode.
+const Sink = enum { typing, clipboard };
+
 const LoopState = struct {
     mode: zhisper.hotkey.Mode,
     recording: bool = false,
     press_count: u32 = 0,
+    /// Output target of the current recording, and also its identity: only the
+    /// key that started it can stop it.
+    sink: Sink = .typing,
 };
+
+/// Which key an event came from. Key-based rather than press-based, because
+/// the release arm reads this to confirm the releasing key owns the recording.
+fn sinkFor(ev: zhisper.hotkey.KeyEvent) Sink {
+    return switch (ev) {
+        .clipboard_pressed, .clipboard_released => .clipboard,
+        .hotkey_pressed, .hotkey_released, .cancel_pressed => .typing,
+    };
+}
 
 fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
     if (ev == .cancel_pressed) {
@@ -131,24 +149,29 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
     }
     switch (s.mode) {
         .hold => switch (ev) {
-            .hotkey_pressed => {
+            .hotkey_pressed, .clipboard_pressed => {
                 if (s.recording) return .ignore;
                 s.recording = true;
+                s.sink = sinkFor(ev);
                 return .start;
             },
-            .hotkey_released => {
+            .hotkey_released, .clipboard_released => {
                 if (!s.recording) return .ignore;
+                // Only the key that started the recording ends it. Otherwise a
+                // tap of the other key mid-dictation truncates the sentence.
+                if (sinkFor(ev) != s.sink) return .ignore;
                 s.recording = false;
                 return .stop;
             },
             .cancel_pressed => unreachable, // handled above
         },
         .toggle => switch (ev) {
-            .hotkey_released => return .ignore,
-            .hotkey_pressed => {
+            .hotkey_released, .clipboard_released => return .ignore,
+            .hotkey_pressed, .clipboard_pressed => {
                 s.press_count += 1;
                 if (!s.recording) {
                     s.recording = true;
+                    s.sink = sinkFor(ev);
                     return .start;
                 }
                 s.recording = false;
@@ -725,6 +748,71 @@ test "overlay state derives from recording then pending" {
     try std.testing.expectEqual(zhisper.overlay.State.recording, overlayStateFor(true, true));
     try std.testing.expectEqual(zhisper.overlay.State.working, overlayStateFor(false, true));
     try std.testing.expectEqual(zhisper.overlay.State.idle, overlayStateFor(false, false));
+}
+
+test "clipboard press starts a clipboard recording and release stops it" {
+    var s = LoopState{ .mode = .hold };
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .clipboard_pressed));
+    try std.testing.expectEqual(Sink.clipboard, s.sink);
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .clipboard_released));
+}
+
+test "the clipboard key mirrors the dictation key in toggle mode" {
+    var s = LoopState{ .mode = .toggle };
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .clipboard_pressed));
+    try std.testing.expectEqual(Sink.clipboard, s.sink);
+    // Toggle ignores every release, same as the dictation key.
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .clipboard_released));
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .clipboard_pressed));
+    try std.testing.expectEqual(@as(u32, 2), s.press_count);
+}
+
+test "a clipboard press while dictating is ignored and does not change the sink" {
+    var s = LoopState{ .mode = .hold };
+    try std.testing.expectEqual(Action.start, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .clipboard_pressed));
+    try std.testing.expectEqual(Sink.typing, s.sink);
+}
+
+test "a dictation press while clipboard recording is ignored" {
+    var s = LoopState{ .mode = .hold };
+    _ = handleHotkeyEvent(&s, .clipboard_pressed);
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .hotkey_pressed));
+    try std.testing.expectEqual(Sink.clipboard, s.sink);
+    try std.testing.expect(s.recording);
+}
+
+test "the clipboard release does not stop a recording the dictation key started" {
+    // Without the owner check, a user who holds the dictation key and taps the
+    // clipboard key would have the tap end their dictation mid-sentence.
+    var s = LoopState{ .mode = .hold };
+    _ = handleHotkeyEvent(&s, .hotkey_pressed);
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .clipboard_released));
+    try std.testing.expect(s.recording);
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .hotkey_released));
+}
+
+test "the dictation release does not stop a recording the clipboard key started" {
+    var s = LoopState{ .mode = .hold };
+    _ = handleHotkeyEvent(&s, .clipboard_pressed);
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .hotkey_released));
+    try std.testing.expectEqual(Action.stop, handleHotkeyEvent(&s, .clipboard_released));
+}
+
+test "cancel clears a clipboard recording" {
+    var s = LoopState{ .mode = .hold };
+    _ = handleHotkeyEvent(&s, .clipboard_pressed);
+    try std.testing.expectEqual(Action.cancel, handleHotkeyEvent(&s, .cancel_pressed));
+    try std.testing.expect(!s.recording);
+    // The trailing release stays a no-op, exactly as for a dictation recording.
+    try std.testing.expectEqual(Action.ignore, handleHotkeyEvent(&s, .clipboard_released));
+}
+
+test "a clipboard recording uses the same overlay and tray indicators" {
+    var s = LoopState{ .mode = .hold };
+    _ = handleHotkeyEvent(&s, .clipboard_pressed);
+    try std.testing.expectEqual(zhisper.overlay.State.recording, overlayStateFor(s.recording, false));
+    try std.testing.expectEqual(zhisper.tray.State.recording, trayStateFor(s.recording, false, false));
 }
 
 test "std_options routes through env-gated logFn" {

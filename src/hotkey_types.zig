@@ -7,9 +7,13 @@ const std = @import("std");
 /// The explicit u8 tag is required because EventRing stores KeyEvent inside
 /// std.atomic.Value, which is an extern struct and therefore needs a
 /// fixed-size tag type.
-pub const KeyEvent = enum(u8) { hotkey_pressed, hotkey_released, cancel_pressed };
+pub const KeyEvent = enum(u8) { hotkey_pressed, hotkey_released, cancel_pressed, clipboard_pressed, clipboard_released };
 pub const Mode = enum { hold, toggle };
-pub const HotkeyConfig = struct { key_code: u16, mode: Mode = .hold, evdev: []const u8 = "", evdev_name: []const u8 = "", cancel_key_code: u16 = 46 };
+// WHY clipboard_key_code defaults to 0: evdev key 0 is KEY_RESERVED and is
+// never emitted, so 0 is a real disable rather than a real binding. macOS
+// key code 0 is a genuine key (kVK_ANSI_A), which main.zig resolves the same
+// way it already resolves cancel_key_code.
+pub const HotkeyConfig = struct { key_code: u16, mode: Mode = .hold, evdev: []const u8 = "", evdev_name: []const u8 = "", cancel_key_code: u16 = 46, clipboard_key_code: u16 = 0 };
 
 /// Fixed-capacity single-producer / single-consumer queue of hotkey events.
 ///
@@ -119,5 +123,23 @@ test "EventRing reset empties it" {
     var ring = t.EventRing.init();
     ring.push(.hotkey_pressed);
     ring.reset();
+    try std.testing.expect(ring.pop() == null);
+}
+
+test "clipboard key code defaults to 0, which never fires" {
+    const cfg = HotkeyConfig{ .key_code = 16 };
+    try std.testing.expectEqual(@as(u16, 0), cfg.clipboard_key_code);
+}
+
+test "EventRing preserves clipboard event order" {
+    const t = @import("hotkey_types.zig");
+    var ring = t.EventRing.init();
+    defer ring.reset();
+    ring.push(.clipboard_pressed);
+    ring.push(.clipboard_released);
+    ring.push(.cancel_pressed);
+    try std.testing.expectEqual(t.KeyEvent.clipboard_pressed, ring.pop().?);
+    try std.testing.expectEqual(t.KeyEvent.clipboard_released, ring.pop().?);
+    try std.testing.expectEqual(t.KeyEvent.cancel_pressed, ring.pop().?);
     try std.testing.expect(ring.pop() == null);
 }
