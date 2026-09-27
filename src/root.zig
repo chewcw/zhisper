@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 // allowed in Zig 0.16, so the backends stay namespaced.)
 pub const audio = @import("audio.zig");
 pub const transcribe = @import("transcribe.zig");
+pub const normalize = @import("normalize.zig");
 pub const hotkey = @import("hotkey.zig");
 pub const hotkey_types = @import("hotkey_types.zig");
 pub const inject = @import("inject.zig");
@@ -21,6 +22,7 @@ pub const clipboard = @import("clipboard.zig");
 test {
     std.testing.refAllDecls(@import("audio.zig"));
     std.testing.refAllDecls(@import("transcribe.zig"));
+    std.testing.refAllDecls(@import("normalize.zig"));
     std.testing.refAllDecls(@import("hotkey.zig"));
     std.testing.refAllDecls(@import("hotkey_types.zig"));
     std.testing.refAllDecls(@import("hotkey_stub.zig"));
