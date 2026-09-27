@@ -172,11 +172,16 @@ pub fn pollEvent() ?KeyEvent {
         const n = std.os.linux.read(fd_evdev, bytes.ptr, bytes.len);
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
-        log.debug("ev code={d} value={d} (want {d})", .{ ev.code, ev.value, active_cfg.key_code });
+        log.debug("ev code={d} value={d} (want talk={d} clipboard={d} cancel={d})", .{ ev.code, ev.value, active_cfg.key_code, active_cfg.clipboard_key_code, active_cfg.cancel_key_code });
         // Hotkey first so a misconfigured cancel == hotkey degrades to hotkey.
         if (ev.code == active_cfg.key_code) {
             if (ev.value == 1) return .hotkey_pressed;
             if (ev.value == 0) return .hotkey_released;
+            continue; // value == 2 is auto-repeat: ignore.
+        }
+        if (active_cfg.clipboard_key_code != 0 and ev.code == active_cfg.clipboard_key_code) {
+            if (ev.value == 1) return .clipboard_pressed;
+            if (ev.value == 0) return .clipboard_released;
             continue; // value == 2 is auto-repeat: ignore.
         }
         if (active_cfg.cancel_key_code != 0 and ev.code == active_cfg.cancel_key_code) {
@@ -312,4 +317,66 @@ test "eventDeviceName reads sysfs or skips without input subsystem" {
     var buf: [256]u8 = undefined;
     const got = eventDeviceName(0, &buf) orelse return error.SkipZigTest;
     try std.testing.expect(got.len > 0);
+}
+
+test "pollEvent decodes clipboard press and release" {
+    // WHY pipe2 + NONBLOCK: std.posix.pipe does not exist in Zig 0.16, and a
+    // blocking pipe would hang the final null-check forever (no writer left).
+    // Nonblocking read returns EAGAIN instead, exactly like an idle evdev fd.
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 87 });
+    try writeTestEvent(fds[1], c.EV_KEY, 87, 1);
+    try std.testing.expectEqual(KeyEvent.clipboard_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 87, 0);
+    try std.testing.expectEqual(KeyEvent.clipboard_released, pollEvent().?);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "pollEvent swallows clipboard autorepeat" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 87 });
+    // value 2 is auto-repeat: a held key must not re-report presses.
+    try writeTestEvent(fds[1], c.EV_KEY, 87, 2);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "a clipboard key of 0 never fires" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 0 });
+    try writeTestEvent(fds[1], c.EV_KEY, 87, 1);
+    try writeTestEvent(fds[1], c.EV_KEY, 87, 0);
+    try std.testing.expect(pollEvent() == null);
 }
