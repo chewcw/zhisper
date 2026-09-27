@@ -37,6 +37,9 @@ device = ""       # empty = system default mic
 # GROQ_API_KEY / ZHISPER_API_KEY.
 enabled = false
 model = ""        # empty = preset default (openai/gpt-oss-20b)
+base_url = ""     # empty = preset default; set to point at any OpenAI-compatible
+                  # chat completions endpoint (self-hosted, proxy, or a future
+                  # provider) without recompiling.
 # The three axes below are closed sets. Values outside them degrade output,
 # because the prompt format was only trained on these combinations.
 styling = "semi-formal"  # casual | semi-casual | semi-formal | formal

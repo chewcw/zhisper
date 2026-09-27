@@ -16,6 +16,7 @@ pub const TranscribeCfg = struct {
 pub const NormalizeCfg = struct {
     enabled: bool = false,
     model: []const u8 = "",
+    base_url: []const u8 = "",
     styling: []const u8 = "semi-formal",
     structure: []const u8 = "prose",
     context: []const u8 = "general",
@@ -141,6 +142,8 @@ pub fn dupeConfig(gpa: std.mem.Allocator, cfg: Config) !Config {
     errdefer gpa.free(out.transcribe.prompt);
     out.normalize.model = try gpa.dupe(u8, cfg.normalize.model);
     errdefer gpa.free(out.normalize.model);
+    out.normalize.base_url = try gpa.dupe(u8, cfg.normalize.base_url);
+    errdefer gpa.free(out.normalize.base_url);
     out.normalize.styling = try gpa.dupe(u8, cfg.normalize.styling);
     errdefer gpa.free(out.normalize.styling);
     out.normalize.structure = try gpa.dupe(u8, cfg.normalize.structure);
@@ -167,6 +170,7 @@ pub fn freeConfig(gpa: std.mem.Allocator, cfg: Config) void {
     gpa.free(cfg.transcribe.base_url);
     gpa.free(cfg.transcribe.prompt);
     gpa.free(cfg.normalize.model);
+    gpa.free(cfg.normalize.base_url);
     gpa.free(cfg.normalize.styling);
     gpa.free(cfg.normalize.structure);
     gpa.free(cfg.normalize.context);
@@ -360,7 +364,7 @@ pub fn fileSignature(io: std.Io, path: []const u8) ?std.Io.File.Stat {
 // single owner of this list; the struct definitions above own the values.
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
-    .{ .name = "normalize", .keys = &.{ "enabled", "model", "styling", "structure", "context" } },
+    .{ .name = "normalize", .keys = &.{ "enabled", "model", "base_url", "styling", "structure", "context" } },
     .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "verbose" } },
@@ -640,6 +644,7 @@ test "normalize defaults to disabled with the trained axis values" {
     const cfg = defaultConfig();
     try std.testing.expect(!cfg.normalize.enabled);
     try std.testing.expectEqualStrings("", cfg.normalize.model);
+    try std.testing.expectEqualStrings("", cfg.normalize.base_url);
     try std.testing.expectEqualStrings("semi-formal", cfg.normalize.styling);
     try std.testing.expectEqualStrings("prose", cfg.normalize.structure);
     try std.testing.expectEqualStrings("general", cfg.normalize.context);
@@ -652,6 +657,7 @@ test "parseFileConfig reads the normalize section" {
         \\[normalize]
         \\enabled = true
         \\model = "openai/gpt-oss-120b"
+        \\base_url = "http://127.0.0.1:11434/v1/chat/completions"
         \\styling = "formal"
         \\structure = "lists"
         \\context = "email"
@@ -664,6 +670,7 @@ test "parseFileConfig reads the normalize section" {
     try validate(cfg);
     try std.testing.expect(cfg.normalize.enabled);
     try std.testing.expectEqualStrings("openai/gpt-oss-120b", cfg.normalize.model);
+    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", cfg.normalize.base_url);
     try std.testing.expectEqualStrings("formal", cfg.normalize.styling);
     try std.testing.expectEqualStrings("lists", cfg.normalize.structure);
     try std.testing.expectEqualStrings("email", cfg.normalize.context);

@@ -71,6 +71,18 @@ fn buildTranscribeConfig(unified: zhisper.config.Config, api_key: []const u8) zh
     };
 }
 
+fn buildNormalizeConfig(unified: zhisper.config.Config, api_key: []const u8) zhisper.normalize.ResolutionError!zhisper.normalize.Config {
+    var cfg = try zhisper.normalize.resolveConfig(unified.normalize.model, unified.normalize.base_url, api_key);
+    // resolveConfig only fills in the endpoint and model, so the three axis
+    // values have to be copied across separately. Inlining this at the call
+    // site is what let the endpoint override and the axes be silently
+    // dropped, because nothing tested the wiring.
+    cfg.styling = unified.normalize.styling;
+    cfg.structure = unified.normalize.structure;
+    cfg.context = unified.normalize.context;
+    return cfg;
+}
+
 fn resolveApiKey(provider: zhisper.transcribe.Provider) ?[]const u8 {
     if (std.c.getenv("ZHISPER_API_KEY")) |raw| {
         if (raw[0] != 0) return std.mem.span(raw);
@@ -233,7 +245,7 @@ fn workerMain(
         var final_text = text;
         if (normalize_flag.load(.monotonic) and text.len > 0) {
             const normalize_log = std.log.scoped(.normalize);
-            if (zhisper.normalize.resolveConfig(cfg.normalize.model, "", api_key)) |n_cfg| {
+            if (buildNormalizeConfig(cfg, api_key)) |n_cfg| {
                 if (zhisper.normalize.normalizeWithConfig(io, gpa, text, n_cfg)) |clean| {
                     final_text = clean;
                 } else |err| {
@@ -622,6 +634,41 @@ test "buildTranscribeConfig copies provider fields plus key" {
     try std.testing.expectEqualStrings("m", t.model);
     try std.testing.expectEqualStrings("k123", t.api_key);
     try std.testing.expectEqualStrings("p", t.prompt);
+}
+
+test "buildNormalizeConfig carries the endpoint override and all three axes" {
+    const unified = zhisper.config.Config{
+        .normalize = .{
+            .enabled = true,
+            .model = "some-model",
+            .base_url = "http://127.0.0.1:11434/v1/chat/completions",
+            .styling = "formal",
+            .structure = "lists",
+            .context = "email",
+        },
+    };
+    const n = try buildNormalizeConfig(unified, "k123");
+    try std.testing.expectEqualStrings("some-model", n.model);
+    try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1/chat/completions", n.base_url);
+    try std.testing.expectEqualStrings("k123", n.api_key);
+    try std.testing.expectEqualStrings("formal", n.styling);
+    try std.testing.expectEqualStrings("lists", n.structure);
+    try std.testing.expectEqualStrings("email", n.context);
+}
+
+test "buildNormalizeConfig falls back to the preset endpoint and model" {
+    const unified = zhisper.config.Config{ .normalize = .{} };
+    const n = try buildNormalizeConfig(unified, "k123");
+    try std.testing.expectEqualStrings(zhisper.normalize.default_base_url, n.base_url);
+    try std.testing.expectEqualStrings(zhisper.normalize.default_model, n.model);
+    try std.testing.expectEqualStrings("semi-formal", n.styling);
+    try std.testing.expectEqualStrings("prose", n.structure);
+    try std.testing.expectEqualStrings("general", n.context);
+}
+
+test "buildNormalizeConfig rejects an empty key" {
+    const unified = zhisper.config.Config{ .normalize = .{} };
+    try std.testing.expectError(error.MissingApiKey, buildNormalizeConfig(unified, ""));
 }
 
 test "hold press starts, release stops, extras ignored" {
