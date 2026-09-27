@@ -300,10 +300,15 @@ test "failed transcription exercises the trace without crashing or leaking" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
     const zlog = @import("log.zig");
-    // Turn the gate on so the warn path actually formats; the emitted text
-    // is asserted by formatApiLine in log.zig, not here.
+    // Turn the gate on so the warn path actually formats, and capture the
+    // line instead of logging it: `zig test` owns std_options.logFn, so a
+    // real log line would reach stderr and make the build runner report a
+    // bogus `failed command:` for this passing run.
     zlog.setEnabled(true);
     defer zlog.setEnabled(false);
+    var cap: [zlog.log_buf]u8 = undefined;
+    zlog.beginCapture(&cap);
+    defer zlog.endCapture();
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "trace-tiny.wav", .data = "RIFF" });
     defer std.Io.Dir.cwd().deleteFile(io, "trace-tiny.wav") catch {};
     const cfg: Config = .{ .base_url = "http://127.0.0.1:9/audio/transcriptions", .model = "m", .api_key = "dummy-key" };
@@ -311,6 +316,10 @@ test "failed transcription exercises the trace without crashing or leaking" {
     // The discard port refuses the connection, so the fetch fails before a
     // status exists: this is the `failed` path. The error set is unchanged.
     try std.testing.expect(err == error.HttpError or err == error.UpstreamRejected);
+    // The wiring under test is that this call reached the `failed` emitter
+    // with the configured URL and the transport error name.
+    try std.testing.expect(std.mem.startsWith(u8, zlog.captured(), "transcribe POST http://127.0.0.1:9/audio/transcriptions -> "));
+    try std.testing.expect(std.mem.indexOf(u8, zlog.captured(), "ConnectionRefused") != null);
 }
 
 test "transcribeWithConfig against discard port fails without network" {

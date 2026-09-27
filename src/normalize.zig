@@ -263,9 +263,14 @@ test "normalizeWithConfig against discard port fails without network" {
     const gpa = std.testing.allocator;
     // Gate on so the `failed` emitter actually formats; without this the
     // trace returns at the shouldLog check and normalize's wiring is never
-    // exercised. The emitted text is asserted by formatApiLine in log.zig.
+    // exercised. Capture rather than log: `zig test` owns
+    // std_options.logFn, so a real log line would reach stderr and make the
+    // build runner report a bogus `failed command:` for this passing run.
     log.setEnabled(true);
     defer log.setEnabled(false);
+    var cap: [log.log_buf]u8 = undefined;
+    log.beginCapture(&cap);
+    defer log.endCapture();
     const cfg: Config = .{
         .base_url = "http://127.0.0.1:9/chat/completions",
         .model = default_model,
@@ -275,6 +280,8 @@ test "normalizeWithConfig against discard port fails without network" {
     // Any transport-level error is acceptable. What matters is that it does
     // NOT succeed and does not reach a real provider.
     try std.testing.expect(err != error.MissingText);
+    // The wiring under test is that this call reached the `failed` emitter.
+    try std.testing.expect(std.mem.startsWith(u8, log.captured(), "normalize POST http://127.0.0.1:9/chat/completions -> "));
 }
 
 test "buildUserMessage puts the control line above the transcript" {

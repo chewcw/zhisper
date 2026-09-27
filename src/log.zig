@@ -63,6 +63,52 @@ pub fn formatApiLine(
 /// trace we would only truncate mid-word.
 pub const upstream_cap: usize = 512;
 
+/// Test-only landing spot for an already formatted trace line; see `emit`.
+/// Only tests ever set it — the daemon leaves it null and logs normally.
+var capture_buf: ?[]u8 = null;
+var capture_len: usize = 0;
+
+/// Diverts emitted trace lines into `buf` instead of the process log. The
+/// buffer is borrowed for the life of the capture; `buf` must outlive it.
+pub fn beginCapture(buf: []u8) void {
+    capture_buf = buf;
+    capture_len = 0;
+}
+
+pub fn endCapture() void {
+    capture_buf = null;
+    capture_len = 0;
+}
+
+pub fn captured() []const u8 {
+    return capture_buf.?[0..capture_len];
+}
+
+/// The single exit for a trace line, so a test can read what a call would
+/// have logged.
+///
+/// WHY a capture instead of silencing the log: `zig test` replaces
+/// `std_options.logFn` with the test runner's (`compiler/test_runner.zig`),
+/// so a library `std_options` is ignored and every `warn` lands on stderr.
+/// The build runner keeps that stderr on the success path
+/// (`Build/Step/Run.zig`), so one byte from a *passing* test makes
+/// `zig build test` print a bogus `failed command:` block. It also means
+/// the test asserts the real emitted line rather than re-deriving it from
+/// `formatApiLine`. An over-long line is truncated, never overflowed.
+fn emit(comptime level: std.log.Level, line: []const u8) void {
+    if (capture_buf) |buf| {
+        const n = @min(buf.len, line.len);
+        @memcpy(buf[0..n], line[0..n]);
+        capture_len = n;
+        return;
+    }
+    if (level == .debug) {
+        std.log.scoped(.api).debug("{s}", .{line});
+    } else {
+        std.log.scoped(.api).warn("{s}", .{line});
+    }
+}
+
 /// One in-flight API call, logged as a single line when it finishes.
 ///
 /// WHY metadata only: a verbose line goes to whatever stdout the daemon was
@@ -99,7 +145,7 @@ pub const ApiTrace = struct {
         if (!shouldLog(.debug)) return;
         var buf: [log_buf]u8 = undefined;
         const line = formatApiLine(&buf, self.tag, self.url, .ok, status, resp_len, self.detail, self.elapsedMs()) catch return;
-        std.log.scoped(.api).debug("{s}", .{line});
+        emit(.debug, line);
     }
 
     /// Non-2xx. `.warn` because the status and the provider's own message
@@ -111,7 +157,7 @@ pub const ApiTrace = struct {
         var cap_buf: [upstream_cap]u8 = undefined;
         const capped = truncateInto(&cap_buf, upstream, "...");
         const line = formatApiLine(&buf, self.tag, self.url, .rejected, status, upstream.len, capped, self.elapsedMs()) catch return;
-        std.log.scoped(.api).warn("{s}", .{line});
+        emit(.warn, line);
     }
 
     /// Transport failure — no status, no response body, so nothing to cap.
@@ -119,7 +165,7 @@ pub const ApiTrace = struct {
         if (!shouldLog(.warn)) return;
         var buf: [log_buf]u8 = undefined;
         const line = formatApiLine(&buf, self.tag, self.url, .failed, 0, 0, @errorName(err), self.elapsedMs()) catch return;
-        std.log.scoped(.api).warn("{s}", .{line});
+        emit(.warn, line);
     }
 
     /// A 2xx whose body exceeded the module's `response_cap`.
@@ -127,7 +173,7 @@ pub const ApiTrace = struct {
         if (!shouldLog(.warn)) return;
         var buf: [log_buf]u8 = undefined;
         const line = formatApiLine(&buf, self.tag, self.url, .too_large, status, resp_len, "", self.elapsedMs()) catch return;
-        std.log.scoped(.api).warn("{s}", .{line});
+        emit(.warn, line);
     }
 };
 
@@ -233,6 +279,37 @@ test "a one-megabyte upstream error body still fits the log buffer" {
     const line = try formatApiLine(&buf, "transcribe", "https://x/y", .rejected, 500, huge.len, capped, 5);
     try std.testing.expect(log_buf > line.len);
     try std.testing.expect(std.mem.endsWith(u8, line, "xxx..."));
+}
+
+test "emit hands the line to the capture instead of the process log" {
+    var buf: [log_buf]u8 = undefined;
+    beginCapture(&buf);
+    defer endCapture();
+    setEnabled(true);
+    defer setEnabled(false);
+    const t = ApiTrace.begin(std.testing.io, "transcribe", "https://x/y", "model=\"m\"");
+    t.failed(error.HttpError);
+    // Latency is a live measurement, so assert the stable prefix and that
+    // the line ends with the millisecond count rather than a fixed string.
+    try std.testing.expect(std.mem.startsWith(u8, captured(), "transcribe POST https://x/y -> HttpError in "));
+    var digits: usize = 0;
+    for (captured()["transcribe POST https://x/y -> HttpError in ".len..]) |c| {
+        if (std.ascii.isDigit(c)) digits += 1;
+    }
+    try std.testing.expect(digits > 0);
+    try std.testing.expect(std.mem.endsWith(u8, captured(), "ms"));
+}
+
+test "a capture shorter than the line truncates instead of overflowing" {
+    var buf: [8]u8 = undefined;
+    beginCapture(&buf);
+    defer endCapture();
+    setEnabled(true);
+    defer setEnabled(false);
+    const t = ApiTrace.begin(std.testing.io, "normalize", "https://x/y", "");
+    t.failed(error.HttpError);
+    try std.testing.expectEqual(@as(usize, 8), captured().len);
+    try std.testing.expectEqualStrings("normaliz", captured());
 }
 
 test "trace emitters are no-ops while logging is disabled" {
