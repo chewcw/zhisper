@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = @import("log.zig");
 
 /// Task instructions for the normalizer, sent as the system message.
 ///
@@ -174,12 +175,27 @@ pub fn isPlausibleOutput(raw: []const u8, normalized: []const u8) bool {
     return normalized.len <= 4 * raw.len + 256;
 }
 
+/// Metadata for the success line of one normalization request. WHY the input
+/// is a length and not the text: the input is the user's transcript, the
+/// most sensitive thing in the process, and a verbose line must not carry
+/// it. The three axis values are already in the request body, so they are
+/// not repeated here.
+pub fn requestDetail(buf: []u8, model: []const u8, req_len: usize, input_len: usize) std.fmt.BufPrintError![]const u8 {
+    return std.fmt.bufPrint(buf, "model=\"{s}\" req={d}B (input={d}B)", .{ model, req_len, input_len });
+}
+
 /// Canonical HTTP path: JSON POST, Bearer auth, `{"choices":[...]}`
 /// response. Non-200 maps to `error.UpstreamRejected`; the status code is the
 /// caller's to log. The key is never logged and never appears in an error.
 pub fn normalizeWithConfig(io: std.Io, gpa: std.mem.Allocator, text: []const u8, cfg: Config) ![]u8 {
     const body = try buildBody(gpa, text, cfg);
     defer gpa.free(body);
+
+    // Same ordering contract as transcribeWithConfig: the borrowed detail
+    // buffer is declared before the trace and outlives it.
+    var detail_buf: [160]u8 = undefined;
+    const detail = requestDetail(&detail_buf, cfg.model, body.len, text.len) catch "detail unavailable";
+    const trace = log.ApiTrace.begin(io, "normalize", cfg.base_url, detail);
 
     const auth = try std.fmt.allocPrint(gpa, "Bearer {s}", .{cfg.api_key});
     defer gpa.free(auth);
@@ -203,11 +219,23 @@ pub fn normalizeWithConfig(io: std.Io, gpa: std.mem.Allocator, text: []const u8,
         },
         .payload = body,
         .response_writer = &resp.writer,
-    }) catch return error.HttpError;
-    if (res.status != .ok) return error.UpstreamRejected;
+    }) catch |err| {
+        trace.failed(err);
+        return error.HttpError;
+    };
+    if (res.status != .ok) {
+        // Read before returning: `defer resp.deinit()` would otherwise
+        // discard the provider's explanation of the rejection.
+        trace.rejected(@intFromEnum(res.status), resp.writer.buffered());
+        return error.UpstreamRejected;
+    }
 
     const json_body = resp.writer.buffered();
-    if (json_body.len > response_cap) return error.ResponseTooLarge;
+    if (json_body.len > response_cap) {
+        trace.tooLarge(@intFromEnum(res.status), json_body.len);
+        return error.ResponseTooLarge;
+    }
+    trace.ok(@intFromEnum(res.status), json_body.len);
 
     // Copy out before the guards so a rejected response is still released.
     const content = try parseContent(gpa, json_body);
@@ -222,9 +250,22 @@ pub fn normalizeWithConfig(io: std.Io, gpa: std.mem.Allocator, text: []const u8,
     return try gpa.dupe(u8, final);
 }
 
+test "requestDetail reports the input length, never the transcript" {
+    var buf: [160]u8 = undefined;
+    const got = try requestDetail(&buf, "openai/gpt-oss-20b", 1234, 890);
+    try std.testing.expectEqualStrings("model=\"openai/gpt-oss-20b\" req=1234B (input=890B)", got);
+    // The transcript is the sensitive field; it must not be a parameter.
+    try std.testing.expect(std.mem.indexOf(u8, got, "text") == null);
+}
+
 test "normalizeWithConfig against discard port fails without network" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
+    // Gate on so the `failed` emitter actually formats; without this the
+    // trace returns at the shouldLog check and normalize's wiring is never
+    // exercised. The emitted text is asserted by formatApiLine in log.zig.
+    log.setEnabled(true);
+    defer log.setEnabled(false);
     const cfg: Config = .{
         .base_url = "http://127.0.0.1:9/chat/completions",
         .model = default_model,
