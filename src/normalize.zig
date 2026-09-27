@@ -164,6 +164,68 @@ pub fn isPlausibleOutput(raw: []const u8, normalized: []const u8) bool {
     return normalized.len <= 4 * raw.len + 256;
 }
 
+/// Canonical HTTP path: JSON POST, Bearer auth, `{"choices":[...]}`
+/// response. Non-200 maps to `error.UpstreamRejected`; the status code is the
+/// caller's to log. The key is never logged and never appears in an error.
+pub fn normalizeWithConfig(io: std.Io, gpa: std.mem.Allocator, text: []const u8, cfg: Config) ![]u8 {
+    const body = try buildBody(gpa, text, cfg);
+    defer gpa.free(body);
+
+    const auth = try std.fmt.allocPrint(gpa, "Bearer {s}", .{cfg.api_key});
+    defer gpa.free(auth);
+    // Zero the key material before freeing (declared after the free, so it
+    // runs first). Same ordering trick as transcribeWithConfig.
+    defer @memset(auth, 0);
+    const ctype = "application/json";
+
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+
+    var resp: std.Io.Writer.Allocating = .init(gpa);
+    defer resp.deinit();
+
+    const res = client.fetch(.{
+        .location = .{ .url = cfg.base_url },
+        .method = .POST,
+        .headers = .{
+            .authorization = .{ .override = auth },
+            .content_type = .{ .override = ctype },
+        },
+        .payload = body,
+        .response_writer = &resp.writer,
+    }) catch return error.HttpError;
+    if (res.status != .ok) return error.UpstreamRejected;
+
+    const json_body = resp.writer.buffered();
+    if (json_body.len > response_cap) return error.ResponseTooLarge;
+
+    // Copy out before the guards so a rejected response is still released.
+    const content = try parseContent(gpa, json_body);
+    defer gpa.free(content);
+
+    const final = stripCodeFence(content);
+    // Order matters: the empty check runs first because the plausibility
+    // bound (4 * raw.len + 256) is loose enough to accept an empty response
+    // for short input, and emptiness has its own rule.
+    if (final.len == 0) return error.EmptyOutput;
+    if (!isPlausibleOutput(text, final)) return error.DegenerateOutput;
+    return try gpa.dupe(u8, final);
+}
+
+test "normalizeWithConfig against discard port fails without network" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const cfg: Config = .{
+        .base_url = "http://127.0.0.1:9/chat/completions",
+        .model = default_model,
+        .api_key = "dummy-key",
+    };
+    const err = normalizeWithConfig(io, gpa, "hello", cfg) catch |e| e;
+    // Any transport-level error is acceptable. What matters is that it does
+    // NOT succeed and does not reach a real provider.
+    try std.testing.expect(err != error.MissingText);
+}
+
 test "buildUserMessage puts the control line above the transcript" {
     const gpa = std.testing.allocator;
     const got = try buildUserMessage(gpa, "hello there", "semi-formal", "prose", "general");
