@@ -335,6 +335,11 @@ pub fn main(init: std.process.Init) !void {
         var errbuf: [256]u8 = undefined;
         var w = std.Io.File.stderr().writer(io, &errbuf);
         w.interface.print("zhisper: config error: {s}\n", .{@errorName(err)}) catch {};
+        // WHY an explicit flush and not a defer: print only fills errbuf, and
+        // std.process.exit terminates immediately without unwinding, so the
+        // diagnostic would be silently dropped and a config typo would look
+        // like a crash with no message.
+        w.interface.flush() catch {};
         std.process.exit(1);
     };
     defer zhisper.config.freeConfig(arena, cfg);
