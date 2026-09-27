@@ -11,8 +11,8 @@ pub const TranscribeCfg = struct {
 
 /// Optional post-transcription cleanup. Ships disabled so upgrading zhisper
 /// never silently doubles dictation latency. The three axis strings are
-/// closed sets owned by src/normalize.zig; see the S1-mini model card for why
-/// untrained values degrade output.
+/// closed sets owned by src/normalize.zig, which documents why values outside
+/// them degrade the model's output.
 pub const NormalizeCfg = struct {
     enabled: bool = false,
     model: []const u8 = "",
