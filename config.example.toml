@@ -58,4 +58,5 @@ type_delay_ms = 0           # 0 = platform default (macOS 2ms, Windows 0)
 keep_wav_on_error = true
 overlay = true     # false = no floating status pill (tray state unaffected)
 tray = false
+notify = "errors,clipboard"  # "off" | "errors" | "clipboard" | "errors,clipboard"
 verbose = false    # true also logs one metadata line per API call (model, payload sizes, status, latency, upstream error on failure). Never logs keys, audio, or transcripts.

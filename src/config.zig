@@ -1,6 +1,7 @@
 const std = @import("std");
 const toml = @import("toml");
 const normalize = @import("normalize.zig");
+const notify = @import("notify_types.zig");
 
 pub const TranscribeCfg = struct {
     provider: []const u8 = "groq",
@@ -73,6 +74,11 @@ pub const DaemonCfg = struct {
     keep_wav_on_error: bool = true,
     overlay: bool = true,
     tray: bool = false,
+    /// One of notify.level_values. Unlike tray and overlay this defaults to on:
+    /// a user who pressed the clipboard hotkey wants to know what happened,
+    /// and a feature that must be discovered before it works does not solve
+    /// the problem it was built for.
+    notify: []const u8 = "errors,clipboard",
     verbose: bool = false,
 };
 
@@ -164,6 +170,8 @@ pub fn dupeConfig(gpa: std.mem.Allocator, cfg: Config) !Config {
     out.audio.device = try gpa.dupe(u8, cfg.audio.device);
     errdefer gpa.free(out.audio.device);
     out.daemon.wav_path = try gpa.dupe(u8, cfg.daemon.wav_path);
+    errdefer gpa.free(out.daemon.wav_path);
+    out.daemon.notify = try gpa.dupe(u8, cfg.daemon.notify);
     return out;
 }
 
@@ -184,6 +192,7 @@ pub fn freeConfig(gpa: std.mem.Allocator, cfg: Config) void {
     gpa.free(cfg.hotkey.evdev_name);
     gpa.free(cfg.audio.device);
     gpa.free(cfg.daemon.wav_path);
+    gpa.free(cfg.daemon.notify);
 }
 
 pub const EnvValues = struct {
@@ -274,6 +283,7 @@ pub fn validate(cfg: Config) !void {
     if (!isOneOf(cfg.normalize.styling, normalize.styling_values)) return error.InvalidStyling;
     if (!isOneOf(cfg.normalize.structure, normalize.structure_values)) return error.InvalidStructure;
     if (!isOneOf(cfg.normalize.context, normalize.context_values)) return error.InvalidContext;
+    if (!isOneOf(cfg.daemon.notify, notify.level_values)) return error.InvalidNotifyLevel;
 }
 
 fn isOneOf(v: []const u8, set: []const []const u8) bool {
@@ -384,7 +394,7 @@ const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "normalize", .keys = &.{ "enabled", "model", "base_url", "styling", "structure", "context" } },
     .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
-    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "verbose" } },
+    .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "notify", "verbose" } },
 };
 
 fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
@@ -812,4 +822,55 @@ test "clipboard_key_code overlays from the env struct" {
     const cfg = defaultConfig();
     const out = applyEnv(cfg, .{ .clipboard_key_code = 87 });
     try std.testing.expectEqual(@as(?i16, 87), out.hotkey.clipboard_key_code);
+}
+
+test "daemon notify defaults to errors and clipboard" {
+    try std.testing.expectEqualStrings("errors,clipboard", defaultConfig().daemon.notify);
+
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[daemon]
+        \\notify = "clipboard"
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-notify.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-notify.toml") catch {};
+
+    const cfg = try parseFileConfig(gpa, io, "cfg-notify.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectEqualStrings("clipboard", cfg.daemon.notify);
+}
+
+test "daemon notify accepts all four levels" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    for (notify.level_values, 0..) |level, i| {
+        var doc_buf: [64]u8 = undefined;
+        const doc = try std.fmt.bufPrint(&doc_buf, "[daemon]\nnotify = \"{s}\"\n", .{level});
+        const path = try std.fmt.allocPrint(gpa, "cfg-notify-{d}.toml", .{i});
+        defer gpa.free(path);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = doc });
+        defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+        const cfg = try parseFileConfig(gpa, io, path);
+        defer freeConfig(gpa, cfg);
+        try validate(cfg);
+    }
+}
+
+test "daemon notify rejects an unknown level" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[daemon]
+        \\notify = "sometimes"
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-notify-bad.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-notify-bad.toml") catch {};
+
+    const cfg = try parseFileConfig(gpa, io, "cfg-notify-bad.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectError(error.InvalidNotifyLevel, validate(cfg));
 }
