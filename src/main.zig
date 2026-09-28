@@ -19,6 +19,17 @@ fn modeFromString(s: []const u8) !zhisper.hotkey.Mode {
     return error.InvalidMode;
 }
 
+/// Mirrors modeFromString: config.zig validates the string against
+/// notify_types.level_values, and this turns the validated string into the
+/// enum the daemon branches on.
+fn notifyLevelFromString(s: []const u8) !zhisper.notify.Level {
+    if (std.mem.eql(u8, s, "off")) return .off;
+    if (std.mem.eql(u8, s, "errors")) return .errors;
+    if (std.mem.eql(u8, s, "clipboard")) return .clipboard;
+    if (std.mem.eql(u8, s, "errors,clipboard")) return .all;
+    return error.InvalidNotifyLevel;
+}
+
 /// 16kHz mono s16 = 32000 bytes/sec = 32 bytes/ms of payload (header excluded).
 fn minWavPayloadBytes(min_duration_ms: u32) usize {
     return @as(usize, min_duration_ms) * 32;
@@ -196,6 +207,21 @@ fn trayStateFor(recording: bool, active: bool, has_pending: bool) zhisper.tray.S
     return .idle;
 }
 
+/// The one place a notification is enqueued. `forEvent` is pure, so calling
+/// this from either thread is safe; `show` is not, and lives in the loop only.
+/// Never call this while holding `queue.mutex`, so lock order stays
+/// one-directional.
+fn report(
+    io: std.Io,
+    queue: *zhisper.notify.NotifyQueue,
+    level: zhisper.notify.Level,
+    kind: zhisper.notify.Kind,
+    detail: []const u8,
+) void {
+    if (!zhisper.notify.shouldNotify(level, kind)) return;
+    queue.push(io, zhisper.notify_types.forEvent(kind, detail));
+}
+
 var stop_requested: std.atomic.Value(bool) = .init(false);
 
 fn onSignal(_: std.posix.SIG) callconv(.c) void {
@@ -235,6 +261,8 @@ fn workerMain(
     normalize_flag: *std.atomic.Value(bool),
     clipboard_state: zhisper.clipboard.Clipboard,
     trailing_newline: zhisper.inject.TrailingNewline,
+    notify_queue: *zhisper.notify.NotifyQueue,
+    notify_level: zhisper.notify.Level,
 ) void {
     var path_buf: [512]u8 = undefined;
     while (true) {
@@ -265,6 +293,7 @@ fn workerMain(
         const transcribe_log = std.log.scoped(.transcribe);
         const text = zhisper.transcribe.transcribeWithConfig(io, gpa, wav_path, t_cfg) catch |err| {
             transcribe_log.debug("transcribe failed: {s}", .{@errorName(err)});
+            report(io, notify_queue, notify_level, .transcribe_failed, @errorName(err));
             if (!cfg.daemon.keep_wav_on_error) std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
             continue;
         };
@@ -305,11 +334,17 @@ fn workerMain(
                     // delete below and leak a file per misfire. An empty
                     // transcript must never clobber what the user has copied.
                     inject_log.debug("empty transcript, clipboard left untouched", .{});
+                    report(io, notify_queue, notify_level, .empty_transcript, "");
                 } else {
                     zhisper.clipboard.paste(payload, io, clipboard_state) catch |err| {
                         inject_log.debug("clipboard write failed: {s}", .{@errorName(err)});
+                        report(io, notify_queue, notify_level, .clipboard_failed, "");
                     };
                     inject_log.debug("clipboard filled with {d} bytes", .{payload.len});
+                    // Reported outside the catch arm: the catch does not
+                    // return, so a success toast would otherwise land on top
+                    // of the failure one.
+                    report(io, notify_queue, notify_level, .clipboard_ready, payload);
                 }
             },
         }
@@ -487,11 +522,35 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
+    // Probed after the tray so the Windows hint can talk about a tray that has
+    // already been set up or reported failed: a Windows balloon hangs off the
+    // tray icon, so `notify` is unavailable when `tray` is off.
+    const notify_level = try notifyLevelFromString(cfg.daemon.notify);
+    var notify_live = false;
+    var notify_hint: ?[]const u8 = null;
+    if (notify_level != .off) {
+        const availability = zhisper.notify.check(io);
+        notify_live = availability.available;
+        notify_hint = availability.hint;
+    }
+    // One line, at startup, with the reason. A notification that silently never
+    // arrives is the exact failure this feature exists to end.
+    if (notify_level != .off and !notify_live) {
+        daemon_log.warn("notify = {s} is set but {s}", .{
+            cfg.daemon.notify,
+            notify_hint orelse "no notification backend was found",
+        });
+    }
+
+    // Shared by the worker thread and the poll loop. Both enqueue; only the
+    // loop calls show.
+    var notify_queue = zhisper.notify.NotifyQueue{};
+
     var queue = WorkQueue{};
     // Seeded from the config file's value at startup; the poll loop below
     // keeps it in sync.
     var normalize_flag = std.atomic.Value(bool).init(cfg.normalize.enabled);
-    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue, &normalize_flag, clipboard_state, trailing_newline });
+    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue, &normalize_flag, clipboard_state, trailing_newline, &notify_queue, notify_level });
 
     // WHY: the config is loaded once, but `normalize.enabled` is the escape
     // hatch a user reaches for the moment normalization mangles their text.
@@ -506,7 +565,14 @@ pub fn main(init: std.process.Init) !void {
     var have_start = false;
     var wav_counter: u32 = 0;
     const clipboard_label: []const u8 = if (clipboard_code == 0) "off" else "on";
-    daemon_log.info("listening (mode={s}, key={d}, cancel={d}, clipboard={s})", .{ cfg.hotkey.mode, hotkey_code, zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0, clipboard_label });
+    daemon_log.info("listening (mode={s}, key={d}, cancel={d}, clipboard={s}, notify={s}{s})", .{
+        cfg.hotkey.mode,
+        hotkey_code,
+        zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
+        clipboard_label,
+        cfg.daemon.notify,
+        if (notify_live) "" else "!",
+    });
 
     while (!stop_requested.load(.monotonic)) {
         const cfg_now = std.Io.Timestamp.now(io, .awake);
@@ -535,6 +601,18 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         if (tray_live) zhisper.tray.poll(io);
+        if (notify_live) {
+            var pending: [zhisper.notify.queue_capacity]zhisper.notify.Message = undefined;
+            var pending_count: usize = 0;
+            notify_queue.drain(io, &pending, &pending_count);
+            for (pending[0..pending_count]) |msg| {
+                // Best-effort: unlike the tray, a failed notification is not
+                // worth degrading the daemon over.
+                zhisper.notify.show(io, msg) catch |err| {
+                    daemon_log.debug("notification failed: {s}", .{@errorName(err)});
+                };
+            }
+        }
         const ev = zhisper.hotkey.pollEvent();
         if (ev) |e| {
             daemon_log.debug("ev: {any}", .{e});
@@ -572,12 +650,14 @@ pub fn main(init: std.process.Init) !void {
                     have_start = false;
                     if (elapsed_ns < @as(u64, cfg.daemon.min_duration_ms) * 1_000_000) {
                         daemon_log.debug("discarded short press ({d}ns)", .{elapsed_ns});
+                        report(io, &notify_queue, notify_level, .too_short, "");
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
                         continue;
                     }
                     const stat = std.Io.Dir.cwd().statFile(io, wav_path, .{}) catch continue;
                     if (stat.size < 44 + minWavPayloadBytes(cfg.daemon.min_duration_ms)) {
                         daemon_log.debug("discarded quiet clip ({d} bytes)", .{stat.size});
+                        report(io, &notify_queue, notify_level, .quiet_clip, "");
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
                         continue;
                     }
@@ -589,6 +669,7 @@ pub fn main(init: std.process.Init) !void {
                         queue.mutex.unlock(io);
                         std.Io.Dir.cwd().deleteFile(io, old_path) catch {};
                         daemon_log.debug("worker busy, dropped oldest clip", .{});
+                        report(io, &notify_queue, notify_level, .dropped_oldest, "");
                         queue.mutex.lockUncancelable(io);
                     }
                     const copy_len = @min(wav_path.len, queue.pending_path.len);
@@ -887,4 +968,26 @@ test "std_options routes through env-gated logFn" {
     @import("zhisper").log.setEnabled(false);
     try std.testing.expect(@import("zhisper").log.shouldLog(.err));
     try std.testing.expect(!@import("zhisper").log.shouldLog(.debug));
+}
+
+test "notifyLevelFromString maps every config value" {
+    try std.testing.expectEqual(zhisper.notify.Level.off, try notifyLevelFromString("off"));
+    try std.testing.expectEqual(zhisper.notify.Level.errors, try notifyLevelFromString("errors"));
+    try std.testing.expectEqual(zhisper.notify.Level.clipboard, try notifyLevelFromString("clipboard"));
+    try std.testing.expectEqual(zhisper.notify.Level.all, try notifyLevelFromString("errors,clipboard"));
+    try std.testing.expectError(error.InvalidNotifyLevel, notifyLevelFromString("sometimes"));
+}
+
+test "every reported outcome passes the gate at the default level" {
+    const level = zhisper.notify.Level.all;
+    for (std.enums.values(zhisper.notify.Kind)) |kind| {
+        try std.testing.expect(zhisper.notify.shouldNotify(level, kind));
+    }
+}
+
+test "the errors level reports every failure but not the success" {
+    for (std.enums.values(zhisper.notify.Kind)) |kind| {
+        const expected = kind != zhisper.notify.Kind.clipboard_ready;
+        try std.testing.expectEqual(expected, zhisper.notify.shouldNotify(.errors, kind));
+    }
 }
