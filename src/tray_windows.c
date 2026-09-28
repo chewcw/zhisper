@@ -16,6 +16,7 @@ typedef struct ZhisperTray {
 } ZhisperTray;
 
 void zhisper_tray_destroy(ZhisperTray *tray);
+int zhisper_tray_notify(ZhisperTray *tray, const char *title, const char *body, int critical);
 
 static const wchar_t *const tooltips[3] = {
     L"zhisper: idle",
@@ -196,6 +197,37 @@ ZhisperTray *zhisper_tray_create(
         return NULL;
     }
     return tray;
+}
+
+// WHY: a balloon has to hang off an icon that is already in the tray, so this
+// rides on the NOTIFYICONDATAW that zhisper_tray_create filled in. NIM_MODIFY
+// is the modern call, and the icon handles no callbacks, so there is nothing to
+// service on the way back.
+static BOOL utf8_to_wide(const char *src, wchar_t *dst, size_t dst_count) {
+    int needed = MultiByteToWideChar(CP_UTF8, 0, src, -1, NULL, 0);
+    // The probe includes the terminating NUL, so the capacity check has to
+    // reject a source that would only just overflow the fixed buffer.
+    if (needed <= 0 || (size_t)needed > dst_count) return FALSE;
+    return MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, (int)dst_count) > 0;
+}
+
+int zhisper_tray_notify(ZhisperTray *tray, const char *title, const char *body, int critical) {
+    if (tray == NULL) return 0;
+    wchar_t wide_title[64];
+    wchar_t wide_body[256];
+    if (!utf8_to_wide(title, wide_title, 64)) return 0;
+    if (!utf8_to_wide(body, wide_body, 256)) return 0;
+
+    tray->notify.uFlags = NIF_INFO;
+    tray->notify.dwInfoFlags = NIIF_INFO | (critical ? NIIF_WARNING : NIIF_NONE);
+    // NIIF_RESPECT_QUIET_TIME is deliberately NOT set: a discarded dictation
+    // must still surface while the user is in a Focus Assist session.
+    // uTimeout is left alone too — setting it would require bumping uVersion
+    // to NOTIFYICON_VERSION_4, which repacks the callback messages of an icon
+    // that handles no callbacks at all.
+    wcscpy_s(tray->notify.szInfoTitle, 64, wide_title);
+    wcscpy_s(tray->notify.szInfo, 256, wide_body);
+    return Shell_NotifyIconW(NIM_MODIFY, &tray->notify) ? 1 : 0;
 }
 
 int zhisper_tray_set_state(ZhisperTray *tray, int state) {

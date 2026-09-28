@@ -15,6 +15,7 @@ pub const overlay = @import("overlay.zig");
 pub const overlay_types = @import("overlay_types.zig");
 pub const tray = @import("tray.zig");
 pub const tray_types = @import("tray_types.zig");
+pub const notify = @import("notify.zig");
 pub const notify_types = @import("notify_types.zig");
 pub const config = @import("config.zig");
 pub const log = @import("log.zig");
@@ -36,7 +37,9 @@ test {
     std.testing.refAllDecls(@import("tray.zig"));
     std.testing.refAllDecls(@import("tray_types.zig"));
     std.testing.refAllDecls(@import("tray_stub.zig"));
+    std.testing.refAllDecls(@import("notify.zig"));
     std.testing.refAllDecls(@import("notify_types.zig"));
+    std.testing.refAllDecls(@import("notify_stub.zig"));
     std.testing.refAllDecls(@import("config.zig"));
     std.testing.refAllDecls(@import("log.zig"));
     std.testing.refAllDecls(@import("clipboard.zig"));
@@ -47,9 +50,11 @@ test {
         std.testing.refAllDecls(@import("inject_linux.zig"));
         std.testing.refAllDecls(@import("hotkey_linux.zig"));
         std.testing.refAllDecls(@import("tray_linux.zig"));
+        std.testing.refAllDecls(@import("notify_linux.zig"));
     }
     if (builtin.os.tag == .windows) {
         std.testing.refAllDecls(@import("tray_windows.zig"));
+        std.testing.refAllDecls(@import("notify_windows.zig"));
         // These @cImport platform headers (windows.h), which cannot be
         // analyzed on a Linux test build. Their coverage comes from
         // `zig build -Dtarget=x86_64-windows` plus on-device testing.
@@ -58,6 +63,7 @@ test {
     }
     if (builtin.os.tag == .macos) {
         std.testing.refAllDecls(@import("tray_macos.zig"));
+        std.testing.refAllDecls(@import("notify_macos.zig"));
         // Same reason as the Windows block above (ApplicationServices).
         std.testing.refAllDecls(@import("hotkey_macos.zig"));
         std.testing.refAllDecls(@import("inject_macos.zig"));
