@@ -162,7 +162,7 @@ pub fn setup(config: HotkeyConfig) !void {
 
 pub fn pollEvent() ?KeyEvent {
     if (fd_evdev < 0) return null;
-    const log = std.log.scoped(.hotkey);
+    // const log = std.log.scoped(.hotkey);
     // struct input_event layout {timeval time; u16 type; u16 code; s32 value}
     // and value meanings (0 = release, 1 = press, 2 = autorepeat) per:
     // https://www.kernel.org/doc/html/latest/input/input.html (section 1.5)
@@ -172,7 +172,7 @@ pub fn pollEvent() ?KeyEvent {
         const n = std.os.linux.read(fd_evdev, bytes.ptr, bytes.len);
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
-        log.debug("ev code={d} value={d} (want talk={d} clipboard={d} cancel={d})", .{ ev.code, ev.value, active_cfg.key_code, active_cfg.clipboard_key_code, active_cfg.cancel_key_code });
+        // log.debug("ev code={d} value={d} (want talk={d} clipboard={d} cancel={d})", .{ ev.code, ev.value, active_cfg.key_code, active_cfg.clipboard_key_code, active_cfg.cancel_key_code });
         // Hotkey first so a misconfigured cancel == hotkey degrades to hotkey.
         if (ev.code == active_cfg.key_code) {
             if (ev.value == 1) return .hotkey_pressed;
