@@ -15,6 +15,7 @@ pub const overlay = @import("overlay.zig");
 pub const overlay_types = @import("overlay_types.zig");
 pub const tray = @import("tray.zig");
 pub const tray_types = @import("tray_types.zig");
+pub const notify_types = @import("notify_types.zig");
 pub const config = @import("config.zig");
 pub const log = @import("log.zig");
 pub const clipboard = @import("clipboard.zig");
@@ -35,6 +36,7 @@ test {
     std.testing.refAllDecls(@import("tray.zig"));
     std.testing.refAllDecls(@import("tray_types.zig"));
     std.testing.refAllDecls(@import("tray_stub.zig"));
+    std.testing.refAllDecls(@import("notify_types.zig"));
     std.testing.refAllDecls(@import("config.zig"));
     std.testing.refAllDecls(@import("log.zig"));
     std.testing.refAllDecls(@import("clipboard.zig"));
