@@ -571,7 +571,9 @@ pub fn main(init: std.process.Init) !void {
         zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
         clipboard_label,
         cfg.daemon.notify,
-        if (notify_live) "" else "!",
+        // `!` means "you asked for this and it is not available", so it must
+        // not appear for `off` — that is a choice, not a failure.
+        if (notify_level == .off or notify_live) "" else "!",
     });
 
     while (!stop_requested.load(.monotonic)) {
