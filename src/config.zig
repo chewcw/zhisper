@@ -42,6 +42,11 @@ pub const HotkeyCfg = struct {
     /// is off, which is the default. Recording started with this key writes the
     /// transcript to the system clipboard instead of typing it.
     clipboard_key_code: ?i16 = null,
+    /// OS-native key code for the search key, in the same encoding as key_code.
+    /// null (absent) and any negative value both mean the feature is off, which
+    /// is the default. Recording started with this key opens a web search for
+    /// the transcript.
+    search_key_code: ?i16 = null,
 };
 
 /// Default hotkey: KEY_F9 on Linux.
