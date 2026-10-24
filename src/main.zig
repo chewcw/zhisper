@@ -132,7 +132,7 @@ const Action = enum { start, stop, ignore, cancel };
 /// with the job to the worker, and never changed mid-flight — a clipboard
 /// recording can still be transcribing while a dictation recording is queued
 /// behind it, so this is per-job state and never a global mode.
-const Sink = enum { typing, clipboard };
+const Sink = enum { typing, clipboard, search };
 
 const LoopState = struct {
     mode: zhisper.hotkey.Mode,
@@ -148,6 +148,7 @@ const LoopState = struct {
 fn sinkFor(ev: zhisper.hotkey.KeyEvent) Sink {
     return switch (ev) {
         .clipboard_pressed, .clipboard_released => .clipboard,
+        .search_pressed, .search_released => .search,
         .hotkey_pressed, .hotkey_released, .cancel_pressed => .typing,
     };
 }
@@ -160,13 +161,13 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
     }
     switch (s.mode) {
         .hold => switch (ev) {
-            .hotkey_pressed, .clipboard_pressed => {
+            .hotkey_pressed, .clipboard_pressed, .search_pressed => {
                 if (s.recording) return .ignore;
                 s.recording = true;
                 s.sink = sinkFor(ev);
                 return .start;
             },
-            .hotkey_released, .clipboard_released => {
+            .hotkey_released, .clipboard_released, .search_released => {
                 if (!s.recording) return .ignore;
                 // Only the key that started the recording ends it. Otherwise a
                 // tap of the other key mid-dictation truncates the sentence.
@@ -177,8 +178,8 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
             .cancel_pressed => unreachable, // handled above
         },
         .toggle => switch (ev) {
-            .hotkey_released, .clipboard_released => return .ignore,
-            .hotkey_pressed, .clipboard_pressed => {
+            .hotkey_released, .clipboard_released, .search_released => return .ignore,
+            .hotkey_pressed, .clipboard_pressed, .search_pressed => {
                 s.press_count += 1;
                 if (!s.recording) {
                     s.recording = true;
@@ -347,6 +348,32 @@ fn workerMain(
                     report(io, notify_queue, notify_level, .clipboard_ready, payload);
                 }
             },
+            .search => {
+                // Open the default browser on a web search for the transcript
+                const query = std.mem.trim(u8, final_text, " \t\r\n");
+                if (query.len == 0) {
+                    inject_log.debug("empty transcript, no search launched", .{});
+                    continue;
+                }
+                if (zhisper.browser.buildSearchUrl(gpa, cfg.search.base_url, query)) |url| {
+                    defer gpa.free(url);
+                    // Browser first: the visible result must not wait for a
+                    // clipboard tool that may be slow or missing.
+                    zhisper.browser.openUrl(io, gpa, url) catch |err| {
+                        inject_log.debug("browser launch failed: {s}", .{@errorName(err)});
+                        report(io, notify_queue, notify_level, .search_failed, @errorName(err));
+                    };
+                    // Best-effort, and deliberately outside the catch above:
+                    // a failed launch still leaves the query available to
+                    // paste by hand, and a failed copy must not hide that.
+                    zhisper.clipboard.paste(query, io, clipboard_state) catch |err| {
+                        inject_log.debug("clipboard write failed: {s}", .{@errorName(err)});
+                    };
+                } else |err| {
+                    inject_log.debug("search url build failed: {s}", .{@errorName(err)});
+                    report(io, notify_queue, notify_level, .search_failed, @errorName(err));
+                }
+            },
         }
 
         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
@@ -450,6 +477,7 @@ pub fn main(init: std.process.Init) !void {
         .evdev_name = cfg.hotkey.evdev_name,
         .cancel_key_code = zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
         .clipboard_key_code = clipboard_code,
+        .search_key_code = zhisper.config.keyCodeOf(cfg.hotkey.search_key_code) orelse 0,
     }) catch |err| {
         std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
@@ -565,10 +593,11 @@ pub fn main(init: std.process.Init) !void {
     var have_start = false;
     var wav_counter: u32 = 0;
     const clipboard_label: []const u8 = if (clipboard_code == 0) "off" else "on";
-    daemon_log.info("listening (mode={s}, key={d}, cancel={d}, clipboard={s}, notify={s}{s})", .{
+    daemon_log.info("listening (mode={s}, key={d}, cancel={d}, search={d}, clipboard={s}, notify={s}{s})", .{
         cfg.hotkey.mode,
         hotkey_code,
         zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
+        zhisper.config.keyCodeOf(cfg.hotkey.search_key_code) orelse 0,
         clipboard_label,
         cfg.daemon.notify,
         // `!` means "you asked for this and it is not available", so it must

@@ -42,6 +42,21 @@ pub const HotkeyCfg = struct {
     /// is off, which is the default. Recording started with this key writes the
     /// transcript to the system clipboard instead of typing it.
     clipboard_key_code: ?i16 = null,
+    /// OS-native key code for the search key, in the same encoding as key_code.
+    /// null (absent) and any negative value both mean the feature is off, which
+    /// is the default. Recording started with this key opens a web search for
+    /// the transcript.
+    search_key_code: ?i16 = null,
+};
+
+/// Where a search recording sends its query. The value is a prefix only;
+/// the percent-encoded transcript is appended to it.
+pub const default_search_base_url = "https://www.google.com/search?q=";
+
+/// Where search results open. The value is a prefix only; the percent-encoded
+/// transcript is appended to it.
+pub const SearchCfg = struct {
+    base_url: []const u8 = default_search_base_url,
 };
 
 /// Default hotkey: KEY_F9 on Linux.
@@ -88,6 +103,7 @@ pub const Config = struct {
     hotkey: HotkeyCfg = .{},
     audio: AudioCfg = .{},
     daemon: DaemonCfg = .{},
+    search: SearchCfg = .{},
 };
 
 pub fn defaultConfig() Config {
@@ -396,9 +412,10 @@ pub fn fileSignature(io: std.Io, path: []const u8) ?std.Io.File.Stat {
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
     .{ .name = "normalize", .keys = &.{ "enabled", "model", "base_url", "styling", "structure", "context" } },
-    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code" } },
+    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code", "search_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "notify", "verbose" } },
+    .{ .name = "search", .keys = &.{"base_url"} },
 };
 
 fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
@@ -436,7 +453,8 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
             // run *before* the `ok` check below, which skips known keys.
             if (std.mem.eql(u8, "key_code", entry.key_ptr.*) or
                 std.mem.eql(u8, "cancel_key_code", entry.key_ptr.*) or
-                std.mem.eql(u8, "clipboard_key_code", entry.key_ptr.*))
+                std.mem.eql(u8, "clipboard_key_code", entry.key_ptr.*) or
+                std.mem.eql(u8, "search_key_code", entry.key_ptr.*))
             {
                 if (entry.value_ptr.* == .integer) {
                     const v = entry.value_ptr.integer;

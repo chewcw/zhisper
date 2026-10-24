@@ -20,6 +20,8 @@ pub const notify_types = @import("notify_types.zig");
 pub const config = @import("config.zig");
 pub const log = @import("log.zig");
 pub const clipboard = @import("clipboard.zig");
+pub const browser = @import("browser.zig");
+pub const browser_types = @import("browser_types.zig");
 
 test {
     std.testing.refAllDecls(@import("audio.zig"));
