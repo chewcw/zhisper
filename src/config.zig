@@ -100,6 +100,10 @@ pub fn defaultConfig() Config {
 }
 
 pub const CliOverrides = struct {
+    /// Override the OS-default config file path (--config=/path/to/config.toml).
+    /// Not an applyCli/applyEnv field: the path is a meta directive, not a
+    /// config value, so it flows CLI → main → load() directly.
+    config_path: ?[]const u8 = null,
     provider: ?[]const u8 = null,
     model: ?[]const u8 = null,
     base_url: ?[]const u8 = null,

@@ -9,20 +9,18 @@ const help_text =
     \\
     \\options:
     \\.  -h, --help                print this help and exit
+    \\.      --config=<str>        config file path (OS default if absent)
     \\.      --provider=<str>      groq | openai | custom
     \\.      --model=<str>         model (empty = preset)
     \\.      --base-url=<str>      base URL (provider=custom only)
-    \\.      --prompt=<str>        transcription prompt
     \\.      --key-code=<uint>     hotkey code (default 67=F9)
     \\.      --mode=<str>          hold | toggle
     \\.      --cancel-key-code=<uint>  cancel key (0=off, 46=C)
-    \\.      --evdev=<str>         Linux evdev path/name:DEV (empty = auto-scan)
+    \\.      --evdev=<str>         Linux evdev path/name:DEV
     \\.      --device=<str>        mic (empty = default)
     \\.      --list-devices          list mics and exit
     \\.      --wav-path=<str>      wav output path
-    \\.      --min-duration-ms=<uint>  drop clips below this length (ms)
-    \\.      --keep-wav            keep WAV on error
-    \\.      --no-keep-wav         don't keep WAV on error
+    \\.      --min-duration-ms=<uint>  drop clips below length (ms)
     \\.  -v, --verbose             verbose logging
     \\
 ;
@@ -38,10 +36,10 @@ pub fn parseCli(arena: std.mem.Allocator, io: std.Io, argv: []const [:0]const u8
 
 fn fromParsed(parsed: anytype) config.CliOverrides {
     var cli: config.CliOverrides = .{};
+    if (parsed.config) |v| cli.config_path = v;
     if (parsed.provider) |v| cli.provider = v;
     if (parsed.model) |v| cli.model = v;
     if (parsed.@"base-url") |v| cli.base_url = v;
-    if (parsed.prompt) |v| cli.prompt = v;
     if (parsed.@"key-code") |v| cli.key_code = std.math.cast(i16, v);
     if (parsed.mode) |v| cli.mode = v;
     if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(i16, v);
@@ -58,8 +56,6 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.@"list-devices" > 0) cli.list_devices = true;
     if (parsed.@"wav-path") |v| cli.wav_path = v;
     if (parsed.@"min-duration-ms") |v| cli.min_duration_ms = std.math.cast(u32, v);
-    if (parsed.@"keep-wav" > 0) cli.keep_wav_on_error = true;
-    if (parsed.@"no-keep-wav" > 0) cli.keep_wav_on_error = false;
     if (parsed.verbose > 0) cli.verbose = true;
     return cli;
 }
@@ -86,16 +82,6 @@ test "cli defaults to no overrides" {
     try std.testing.expect(cli.verbose == null);
 }
 
-test "cli parses min-duration and keep-wav flags" {
-    const gpa = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const argv = [_][:0]const u8{ "zhisper", "--min-duration-ms=800", "--keep-wav" };
-    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
-    try std.testing.expectEqual(@as(u32, 800), got.min_duration_ms.?);
-    try std.testing.expectEqual(true, got.keep_wav_on_error.?);
-}
-
 test "cli parses evdev path and name: prefix" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -110,15 +96,6 @@ test "cli parses evdev path and name: prefix" {
     try std.testing.expect(got2.evdev_name == null);
 }
 
-test "cli parses no-keep-wav as false" {
-    const gpa = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const argv = [_][:0]const u8{ "zhisper", "--no-keep-wav" };
-    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
-    try std.testing.expectEqual(false, got.keep_wav_on_error.?);
-}
-
 test "cli parses list-devices flag" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
@@ -126,6 +103,24 @@ test "cli parses list-devices flag" {
     const argv = [_][:0]const u8{ "zhisper", "--list-devices" };
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqual(true, got.list_devices);
+}
+
+test "cli parses config flag" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--config=/tmp/custom.toml" };
+    const cli = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqualStrings("/tmp/custom.toml", cli.config_path.?);
+}
+
+test "cli defaults config_path to null" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{"zhisper"};
+    const cli = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expect(cli.config_path == null);
 }
 
 test "cli parses cancel-key-code flag" {
