@@ -5,9 +5,12 @@ const config = @import("zhisper").config;
 const help_text =
     // NOTE: argz scans help_text at comptime under the default 1000-branch
     // quota. Keep this text short; put verbose docs in config.example.toml.
-    \\usage zhisper [options...]
+    // WHY the leading space: argz discards the first character of every help
+    // line (it is the `.`/`!` definition marker slot), so prose lines need a
+    // throwaway first byte or their first letter disappears from --help.
+    \\ usage zhisper [options...]
     \\
-    \\options:
+    \\ options:
     \\.  -h, --help                print this help and exit
     \\.      --config=<str>        config file path (OS default if absent)
     \\.      --provider=<str>      groq | openai | custom

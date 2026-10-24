@@ -992,10 +992,14 @@ test "the inject facade re-exports trailingCut for the clipboard branch" {
 
 test "std_options routes through env-gated logFn" {
     // Generic logFn values don't compare reliably with ==, so verify the
-    // exe root declares std_options with debug max level (proves our decl
-    // wins over the default) and that the gated module is wired.
+    // exe root declares std_options with debug max level and that the gated
+    // module is wired.
+    // WHY our own decl and not `std.options.log_level`: that one falls back to
+    // std's per-optimize-mode default when the test binary's root is not this
+    // file, so it reads `.debug` only because Debug's default happens to be
+    // `.debug` and turns `.info` under ReleaseSafe.
     try std.testing.expect(@hasDecl(@This(), "std_options"));
-    try std.testing.expectEqual(std.log.Level.debug, std.options.log_level);
+    try std.testing.expectEqual(std.log.Level.debug, std_options.log_level);
     @import("zhisper").log.setEnabled(false);
     try std.testing.expect(@import("zhisper").log.shouldLog(.err));
     try std.testing.expect(!@import("zhisper").log.shouldLog(.debug));
