@@ -84,6 +84,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
             --title "$GITHUB_REF_NAME" \
             --notes "Binary release for zhisper $GITHUB_REF_NAME." \
             dist/zhisper-linux-x86_64.tar.gz \
