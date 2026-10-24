@@ -3,7 +3,6 @@ const clipboard = @import("clipboard.zig");
 
 /// Linux clipboard backend: probes `xclip` then `wl-copy` via `which`,
 /// pastes by spawning the tool with stdin piped. Pure Zig, no @cImport.
-
 fn probe(io: std.Io, argv: []const []const u8) bool {
     var child = std.process.spawn(io, .{
         .argv = argv,
@@ -29,7 +28,7 @@ pub fn paste(text: []const u8, io: std.Io, clipboard_state: clipboard.Clipboard)
     const argv: []const []const u8 = if (std.mem.eql(u8, tool, "xclip"))
         &.{ "xclip", "-selection", "clipboard", "-in" }
     else if (std.mem.eql(u8, tool, "wl-copy"))
-        &.{ "wl-copy" }
+        &.{"wl-copy"}
     else
         return error.ClipboardNotAvailable;
 

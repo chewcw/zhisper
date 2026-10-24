@@ -3,7 +3,6 @@ const clipboard = @import("clipboard.zig");
 
 /// macOS clipboard backend: probes `pbcopy`, pastes via `pbcopy` stdin.
 /// Pure Zig so it parses on all targets.
-
 fn probe(io: std.Io, argv: []const []const u8) bool {
     var child = std.process.spawn(io, .{
         .argv = argv,
@@ -27,7 +26,7 @@ pub fn paste(text: []const u8, io: std.Io, clipboard_state: clipboard.Clipboard)
     if (!std.mem.eql(u8, clipboard_state.tool.?, "pbcopy")) return error.ClipboardNotAvailable;
 
     var child = std.process.spawn(io, .{
-        .argv = &.{ "pbcopy" },
+        .argv = &.{"pbcopy"},
         .stdin = .pipe,
         .stdout = .ignore,
         .stderr = .ignore,
