@@ -396,9 +396,10 @@ pub fn fileSignature(io: std.Io, path: []const u8) ?std.Io.File.Stat {
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
     .{ .name = "normalize", .keys = &.{ "enabled", "model", "base_url", "styling", "structure", "context" } },
-    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code" } },
+    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code", "search_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "notify", "verbose" } },
+    .{ .name = "search", .keys = &.{"base_url"} },
 };
 
 fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !void {
@@ -436,7 +437,8 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
             // run *before* the `ok` check below, which skips known keys.
             if (std.mem.eql(u8, "key_code", entry.key_ptr.*) or
                 std.mem.eql(u8, "cancel_key_code", entry.key_ptr.*) or
-                std.mem.eql(u8, "clipboard_key_code", entry.key_ptr.*))
+                std.mem.eql(u8, "clipboard_key_code", entry.key_ptr.*) or
+                std.mem.eql(u8, "search_key_code", entry.key_ptr.*))
             {
                 if (entry.value_ptr.* == .integer) {
                     const v = entry.value_ptr.integer;
