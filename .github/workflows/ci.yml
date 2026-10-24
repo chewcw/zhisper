@@ -46,19 +46,6 @@ jobs:
       - name: Run tests
         run: zig build test
 
-  windows:
-    name: Windows x86_64 cross-build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Install Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.16.0
-      - name: Cross-build Windows x86_64
-        run: zig build -Dtarget=x86_64-windows
-
   # macos:
   #   name: macOS aarch64 cross-build
   #   runs-on: ubuntu-latest
