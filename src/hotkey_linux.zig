@@ -188,6 +188,11 @@ pub fn pollEvent() ?KeyEvent {
             if (ev.value == 1) return .cancel_pressed;
             continue; // cancel release + autorepeat swallowed.
         }
+        if (active_cfg.search_key_code != 0 and ev.code == active_cfg.search_key_code) {
+            if (ev.value == 1) return .search_pressed;
+            if (ev.value == 0) return .search_released;
+            continue; // value == 2 is auto-repeat: ignore.
+        }
     }
 }
 
@@ -378,5 +383,47 @@ test "a clipboard key of 0 never fires" {
     setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 0 });
     try writeTestEvent(fds[1], c.EV_KEY, 87, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 87, 0);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "pollEvent decodes search press and release" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .search_key_code = 65 });
+    try writeTestEvent(fds[1], c.EV_KEY, 65, 1);
+    try std.testing.expectEqual(KeyEvent.search_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 65, 2);
+    try std.testing.expect(pollEvent() == null); // autorepeat swallowed
+    try writeTestEvent(fds[1], c.EV_KEY, 65, 0);
+    try std.testing.expectEqual(KeyEvent.search_released, pollEvent().?);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "search key of 0 never fires" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .search_key_code = 0 });
+    try writeTestEvent(fds[1], c.EV_KEY, 65, 1);
+    try writeTestEvent(fds[1], c.EV_KEY, 65, 0);
     try std.testing.expect(pollEvent() == null);
 }

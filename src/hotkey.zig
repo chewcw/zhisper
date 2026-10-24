@@ -41,3 +41,16 @@ test "facade replays stub events in order" {
     try std.testing.expect(pollEvent() == null);
     destroy();
 }
+
+test "facade replays stub search events in order" {
+    const stub = @import("hotkey_stub.zig");
+    stub.reset();
+    defer stub.reset();
+    try setup(.{ .key_code = 30, .mode = .hold, .search_key_code = 65 });
+    stub.pushTestEvent(.search_pressed);
+    stub.pushTestEvent(.search_released);
+    try std.testing.expectEqual(KeyEvent.search_pressed, pollEvent().?);
+    try std.testing.expectEqual(KeyEvent.search_released, pollEvent().?);
+    try std.testing.expect(pollEvent() == null);
+    destroy();
+}

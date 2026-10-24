@@ -25,6 +25,7 @@ var cfg: types.HotkeyConfig = .{ .key_code = 0 };
 var hotkey_down = false;
 var cancel_down = false;
 var clipboard_down = false;
+var search_down = false;
 var hook: c.HHOOK = null;
 var thread: ?std.Thread = null;
 var status: std.atomic.Value(u8) = .init(status_pending);
@@ -67,6 +68,18 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                     clipboard_down = false;
                     ring.push(.clipboard_released);
                 }
+            } else if (vk == cfg.search_key_code) {
+                // Same transition-once logic as hotkey/clipboard/cancel:
+                // KBDLLHOOKSTRUCT has no repeat flag.
+                if (is_down) {
+                    if (!search_down) {
+                        search_down = true;
+                        ring.push(.search_pressed);
+                    }
+                } else if (search_down) {
+                    search_down = false;
+                    ring.push(.search_released);
+                }
             } else if (vk == cfg.cancel_key_code) {
                 if (is_down) {
                     if (!cancel_down) {
@@ -108,6 +121,7 @@ pub fn setup(config: types.HotkeyConfig) !void {
     hotkey_down = false;
     cancel_down = false;
     clipboard_down = false;
+    search_down = false;
     status.store(status_pending, .release);
     thread_id.store(0, .release);
 

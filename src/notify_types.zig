@@ -15,6 +15,7 @@ pub const Kind = enum {
     empty_transcript,
     clipboard_failed,
     clipboard_ready,
+    search_failed,
 };
 
 /// The four accepted `[daemon] notify` strings. `config.zig` validates
@@ -25,6 +26,8 @@ pub const level_values: []const []const u8 = &.{
     "errors",
     "clipboard",
     "errors,clipboard",
+    "search",
+    "errors,search",
 };
 
 /// Result of the one-shot backend probe at startup. `hint` is the actionable
@@ -159,6 +162,7 @@ fn textFor(kind: Kind, detail: []const u8) TextBuf {
         },
         .empty_transcript => buf.appendSlice("No speech recognized — clipboard left untouched"),
         .clipboard_failed => buf.appendSlice("Transcribed, but the clipboard write failed"),
+        .search_failed => buf.appendSlice("Search launch failed"),
         .clipboard_ready => {
             // The prefix is the whole point: without it a finished dictation
             // and a stray line of text look identical on screen.
@@ -241,12 +245,14 @@ test "shouldNotify maps every level onto every kind" {
     try std.testing.expect(shouldNotify(.errors, .transcribe_failed));
     try std.testing.expect(shouldNotify(.errors, .empty_transcript));
     try std.testing.expect(shouldNotify(.errors, .clipboard_failed));
+    try std.testing.expect(shouldNotify(.errors, .search_failed));
     // The errors level deliberately excludes the one non-failure kind.
     try std.testing.expect(!shouldNotify(.errors, .clipboard_ready));
 
     try std.testing.expect(shouldNotify(.clipboard, .clipboard_ready));
     try std.testing.expect(!shouldNotify(.clipboard, .too_short));
     try std.testing.expect(!shouldNotify(.clipboard, .clipboard_failed));
+    try std.testing.expect(!shouldNotify(.clipboard, .search_failed));
 
     for (std.enums.values(Kind)) |kind| {
         try std.testing.expect(shouldNotify(.all, kind));
@@ -279,10 +285,12 @@ test "forEvent is a pure function of its arguments" {
     try std.testing.expectEqual(first.critical, second.critical);
 }
 
-test "the four config level strings are spelled out" {
-    try std.testing.expectEqual(@as(usize, 4), level_values.len);
+test "the config level strings are spelled out" {
+    try std.testing.expectEqual(@as(usize, 6), level_values.len);
     try std.testing.expectEqualStrings("off", level_values[0]);
     try std.testing.expectEqualStrings("errors", level_values[1]);
     try std.testing.expectEqualStrings("clipboard", level_values[2]);
     try std.testing.expectEqualStrings("errors,clipboard", level_values[3]);
+    try std.testing.expectEqualStrings("search", level_values[4]);
+    try std.testing.expectEqualStrings("errors,search", level_values[5]);
 }

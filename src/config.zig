@@ -49,6 +49,16 @@ pub const HotkeyCfg = struct {
     search_key_code: ?i16 = null,
 };
 
+/// Where a search recording sends its query. The value is a prefix only;
+/// the percent-encoded transcript is appended to it.
+pub const default_search_base_url = "https://www.google.com/search?q=";
+
+/// Where search results open. The value is a prefix only; the percent-encoded
+/// transcript is appended to it.
+pub const SearchCfg = struct {
+    base_url: []const u8 = default_search_base_url,
+};
+
 /// Default hotkey: KEY_F9 on Linux.
 pub const default_key_code: i16 = 67;
 /// Default cancel key: KEY_C on Linux.
@@ -93,6 +103,7 @@ pub const Config = struct {
     hotkey: HotkeyCfg = .{},
     audio: AudioCfg = .{},
     daemon: DaemonCfg = .{},
+    search: SearchCfg = .{},
 };
 
 pub fn defaultConfig() Config {
