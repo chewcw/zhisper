@@ -393,6 +393,14 @@ pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(arena);
     const overrides = try cli.parseCli(arena, io, argv);
 
+    if (overrides.version) {
+        var buf: [256]u8 = undefined;
+        var w = std.Io.File.stdout().writer(io, &buf);
+        _ = w.interface.print("{s}\n", .{build_options.version}) catch {};
+        _ = w.interface.flush() catch {};
+        std.process.exit(0);
+    }
+
     const cfg_path = if (overrides.config_path) |p| p else try resolveConfigPath(arena);
     const cfg = zhisper.config.load(arena, io, cfg_path, overrides) catch |err| {
         var errbuf: [256]u8 = undefined;
