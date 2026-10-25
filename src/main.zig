@@ -3,6 +3,7 @@ const std = @import("std");
 const zhisper = @import("zhisper");
 
 const cli = @import("cli.zig");
+const build_options = @import("build_options");
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
