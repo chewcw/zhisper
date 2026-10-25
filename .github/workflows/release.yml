@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  verify-version:
+    name: Verify tag matches build.zig.zon version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Extract version from build.zig.zon
+        id: zon-version
+        run: |
+          ZON_VER=$(grep -oP '(?<=\.version = ")[^"]+' build.zig.zon)
+          echo "version=${ZON_VER}" >> $GITHUB_OUTPUT
+
+      - name: Extract version from git tag
+        id: tag-version
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          echo "version=${TAG_VER}" >> $GITHUB_OUTPUT
+
+      - name: Verify versions match
+        run: |
+          ZON_VER="${{ steps.zon-version.outputs.version }}"
+          TAG_VER="${{ steps.tag-version.outputs.version }}"
+          echo "build.zig.zon version = ${ZON_VER}"
+          echo "git tag = ${GITHUB_REF_NAME} (-> ${TAG_VER})"
+          if [ "$ZON_VER" != "$TAG_VER" ]; then
+            echo "::error::build.zig.zon .version ('${ZON_VER}') does not match release tag '${GITHUB_REF_NAME}' (expected '${TAG_VER}')"
+            exit 1
+          fi
