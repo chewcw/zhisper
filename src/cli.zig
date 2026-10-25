@@ -47,6 +47,7 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.@"key-code") |v| cli.key_code = std.math.cast(i16, v);
     if (parsed.mode) |v| cli.mode = v;
     if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(i16, v);
+    if (parsed.version > 0) cli.version = true;
     // --evdev accepts either a path (/dev/input/event5) or a logical
     // device name (name:kanata) that survives reboot renumbering.
     if (parsed.evdev) |v| {
