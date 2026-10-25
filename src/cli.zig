@@ -12,6 +12,7 @@ const help_text =
     \\
     \\ options:
     \\.  -h, --help                print this help and exit
+    \\.      --version             print version and exit
     \\.      --config=<str>        config file path (OS default if absent)
     \\.      --provider=<str>      groq | openai | custom
     \\.      --model=<str>         model (empty = preset)
