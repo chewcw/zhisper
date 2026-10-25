@@ -141,7 +141,7 @@ test "cli parses version flag" {
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
-    const argv = [_][:0]const u8{"zhisper", "--version"};
+    const argv = [_][:0]const u8{ "zhisper", "--version" };
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqual(true, got.version);
 }
