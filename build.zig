@@ -1,4 +1,5 @@
 const std = @import("std");
+const zon = @import("build.zig.zon");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -75,6 +76,11 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("AppKit", .{});
         mod.linkFramework("Foundation", .{});
     }
+    // Link for Windows/macOS-specific C sources above.
+
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", zon.version);
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -115,6 +121,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "zhisper", .module = mod },
+                .{ .name = "build_options", .module = options.createModule() },
             },
         }),
     });
