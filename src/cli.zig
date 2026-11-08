@@ -8,23 +8,25 @@ const help_text =
     // WHY the leading space: argz discards the first character of every help
     // line (it is the `.`/`!` definition marker slot), so prose lines need a
     // throwaway first byte or their first letter disappears from --help.
-    \\ zhisper
-    \\.  -h, --help             help
-    \\.      --version          ver
-    \\.      --config=<str>     cfg
-    \\.      --provider=<str>   groq|openai|custom|deepgram
-    \\.      --model=<str>      model
-    \\.      --base-url=<str>   url
-    \\.      --language=<str>   lang
-    \\.      --key-code=<uint>  key
-    \\.      --mode=<str>       mode
-    \\.      --cancel-key-code=<uint> cancel
-    \\.      --evdev=<str>      evdev
-    \\.      --device=<str>     mic
-    \\.      --list-devices       list
-    \\.      --wav-path=<str>   wav
-    \\.      --min-duration-ms=<uint> ms
-    \\.  -v, --verbose          log
+    \\ usage zhisper [options...]
+    \\
+    \\ options:
+    \\.  -h, --help                print this help and exit
+    \\.      --version             print version and exit
+    \\.      --config=<str>        config path (OS default)
+    \\.      --provider=<str>      groq|openai|custom|deepgram
+    \\.      --model=<str>         model (empty = preset)
+    \\.      --base-url=<str>      base URL (custom only)
+    \\.      --language=<str>      language tag (deepgram; empty = auto)
+    \\.      --key-code=<uint>     hotkey code (default 67=F9)
+    \\.      --mode=<str>          hold | toggle
+    \\.      --cancel-key-code=<uint>  cancel key
+    \\.      --evdev=<str>         Linux evdev path/name
+    \\.      --device=<str>        mic (empty = default)
+    \\.      --list-devices          list mics and exit
+    \\.      --wav-path=<str>      wav output path
+    \\.      --min-duration-ms=<uint>  min clip length
+    \\.  -v, --verbose             verbose logging
     \\
 ;
 
