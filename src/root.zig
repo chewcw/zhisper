@@ -22,6 +22,7 @@ pub const log = @import("log.zig");
 pub const clipboard = @import("clipboard.zig");
 pub const browser = @import("browser.zig");
 pub const browser_types = @import("browser_types.zig");
+pub const deepgram_ws = @import("deepgram_ws.zig");
 
 test {
     std.testing.refAllDecls(@import("audio.zig"));
@@ -48,6 +49,7 @@ test {
     std.testing.refAllDecls(@import("clipboard_linux.zig"));
     std.testing.refAllDecls(@import("clipboard_macos.zig"));
     std.testing.refAllDecls(@import("clipboard_windows.zig"));
+    std.testing.refAllDecls(@import("deepgram_ws.zig"));
     if (builtin.os.tag == .linux) {
         std.testing.refAllDecls(@import("inject_linux.zig"));
         std.testing.refAllDecls(@import("hotkey_linux.zig"));
