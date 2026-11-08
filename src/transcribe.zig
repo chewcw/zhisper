@@ -13,7 +13,7 @@ pub const Options = struct {
     base_url: []const u8 = default_base_url,
 };
 
-pub const Provider = enum { groq, openai, custom };
+pub const Provider = enum { groq, openai, deepgram, custom };
 
 pub const Preset = struct {
     base_url: []const u8,
@@ -25,15 +25,17 @@ pub fn presetFor(p: Provider) Preset {
     return switch (p) {
         .groq => .{ .base_url = default_base_url, .model = default_model, .key_env = "GROQ_API_KEY" },
         .openai => .{ .base_url = "https://api.openai.com/v1/audio/transcriptions", .model = "whisper-1", .key_env = "OPENAI_API_KEY" },
+        .deepgram => .{ .base_url = "https://api.deepgram.com/v1/listen", .model = "nova-3", .key_env = "DEEPGRAM_API_KEY" },
         .custom => .{ .base_url = "", .model = "", .key_env = "ZHISPER_API_KEY" },
     };
 }
 
 /// Maps ZHISPER_PROVIDER value to a provider. Null/unknown/groq -> groq except
-/// explicit "openai"/"custom". Unknown strings map to custom so a typo surfaces
+/// explicit "openai"/"custom"/"deepgram". Unknown strings map to custom so a typo surfaces
 /// as MissingBaseUrl (explicit URL required) instead of silently hitting Groq.
 pub fn providerFromName(name: ?[]const u8) Provider {
     const n = name orelse return .groq;
+    if (std.mem.eql(u8, n, "deepgram")) return .deepgram;
     if (std.mem.eql(u8, n, "openai")) return .openai;
     if (std.mem.eql(u8, n, "custom")) return .custom;
     if (std.mem.eql(u8, n, "groq")) return .groq;
@@ -74,6 +76,7 @@ pub fn configFromEnv(model_override: ?[]const u8, base_url_override: ?[]const u8
     const key = envVal("ZHISPER_API_KEY") orelse switch (provider) {
         .groq => envVal("GROQ_API_KEY"),
         .openai => envVal("OPENAI_API_KEY"),
+        .deepgram => envVal("DEEPGRAM_API_KEY"),
         .custom => envVal("ZHISPER_API_KEY"),
     };
     const model_env = envVal("ZHISPER_MODEL");
@@ -275,6 +278,18 @@ test "providerFromName defaults groq, maps openai and custom" {
     try std.testing.expectEqual(Provider.openai, providerFromName("openai"));
     try std.testing.expectEqual(Provider.custom, providerFromName("custom"));
     try std.testing.expectEqual(Provider.custom, providerFromName("bogus"));
+}
+
+test "presetFor(.deepgram) returns the deepgram preset" {
+    const deepgram = presetFor(.deepgram);
+    try std.testing.expectEqualStrings("https://api.deepgram.com/v1/listen", deepgram.base_url);
+    try std.testing.expectEqualStrings("nova-3", deepgram.model);
+    try std.testing.expectEqualStrings("DEEPGRAM_API_KEY", deepgram.key_env);
+}
+
+test "providerFromName maps deepgram case-sensitively" {
+    try std.testing.expectEqual(Provider.deepgram, providerFromName("deepgram"));
+    try std.testing.expectEqual(Provider.custom, providerFromName("Deepgram"));
 }
 
 test "resolveConfig uses preset unless overridden, rejects missing key" {

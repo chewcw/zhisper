@@ -102,6 +102,7 @@ fn resolveApiKey(provider: zhisper.transcribe.Provider) ?[]const u8 {
     const name: [*:0]const u8 = switch (provider) {
         .groq => "GROQ_API_KEY",
         .openai => "OPENAI_API_KEY",
+        .deepgram => "DEEPGRAM_API_KEY",
         .custom => "ZHISPER_API_KEY",
     };
     if (std.c.getenv(name)) |raw| {
