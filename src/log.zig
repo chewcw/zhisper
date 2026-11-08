@@ -177,6 +177,58 @@ pub const ApiTrace = struct {
     }
 };
 
+pub const StreamOutcome = enum { ok, failed };
+
+pub fn formatStreamLine(
+    buf: []u8,
+    url: []const u8,
+    outcome: StreamOutcome,
+    detail: []const u8,
+    ms: i64,
+) std.fmt.BufPrintError![]const u8 {
+    return switch (outcome) {
+        .ok => std.fmt.bufPrint(buf, "transcribe STREAM {s} -> ok {s} {d}ms", .{ url, detail, ms }),
+        .failed => std.fmt.bufPrint(buf, "transcribe STREAM {s} -> failed {s} in {d}ms", .{ url, detail, ms }),
+    };
+}
+
+/// One streaming session, logged as a single line when it finishes.
+///
+/// WHY metadata only: a stream carries the user's speech and API credentials
+/// in flight. Only the bare endpoint, model name, segment count, audio byte
+/// count, and latency are ever logged.
+pub const StreamTrace = struct {
+    io: std.Io,
+    /// Bare stream endpoint, for example `wss://api.deepgram.com/v1/listen`.
+    /// No query string and no key is ever passed in.
+    url: []const u8,
+    start: std.Io.Timestamp,
+
+    pub fn begin(io: std.Io, url: []const u8) StreamTrace {
+        return .{ .io = io, .url = url, .start = .now(io, .awake) };
+    }
+
+    fn elapsedMs(self: StreamTrace) i64 {
+        return self.start.durationTo(.now(self.io, .awake)).toMilliseconds();
+    }
+
+    pub fn ok(self: StreamTrace, model: []const u8, segments: usize, audio_bytes: usize) void {
+        if (!shouldLog(.debug)) return;
+        var detail_buf: [160]u8 = undefined;
+        const detail = std.fmt.bufPrint(&detail_buf, "model=\"{s}\" seg={d} audio={d}B", .{ model, segments, audio_bytes }) catch return;
+        var buf: [log_buf]u8 = undefined;
+        const line = formatStreamLine(&buf, self.url, .ok, detail, self.elapsedMs()) catch return;
+        emit(.debug, line);
+    }
+
+    pub fn failed(self: StreamTrace, err: anyerror) void {
+        if (!shouldLog(.warn)) return;
+        var buf: [log_buf]u8 = undefined;
+        const line = formatStreamLine(&buf, self.url, .failed, @errorName(err), self.elapsedMs()) catch return;
+        emit(.warn, line);
+    }
+};
+
 /// Writes `s` into `buf`, truncated to `buf.len` with `mark` as the tail
 /// marker when `s` does not fit, and returns the region of `buf` holding the
 /// result. Never allocates — `buf` is caller-owned scratch, normally a stack
@@ -341,4 +393,50 @@ test "enabled logs everything" {
     try std.testing.expect(shouldLog(.warn));
     try std.testing.expect(shouldLog(.info));
     try std.testing.expect(shouldLog(.debug));
+}
+
+test "formatStreamLine renders ok and failed shapes" {
+    var buf: [log_buf]u8 = undefined;
+    const ok_line = try formatStreamLine(&buf, "wss://api.deepgram.com/v1/listen", .ok, "model=\"nova-3\" seg=3 audio=48000B", 412);
+    try std.testing.expectEqualStrings("transcribe STREAM wss://api.deepgram.com/v1/listen -> ok model=\"nova-3\" seg=3 audio=48000B 412ms", ok_line);
+
+    const failed_line = try formatStreamLine(&buf, "wss://api.deepgram.com/v1/listen", .failed, "ConnectionRefused", 120);
+    try std.testing.expectEqualStrings("transcribe STREAM wss://api.deepgram.com/v1/listen -> failed ConnectionRefused in 120ms", failed_line);
+}
+
+test "StreamTrace.failed emits a captured stream line with a live latency" {
+    var buf: [log_buf]u8 = undefined;
+    setEnabled(true);
+    defer setEnabled(false);
+    beginCapture(&buf);
+    defer endCapture();
+    const t = StreamTrace.begin(std.testing.io, "wss://api.deepgram.com/v1/listen");
+    t.failed(error.StreamClosed);
+    try std.testing.expect(std.mem.startsWith(u8, captured(), "transcribe STREAM "));
+    try std.testing.expect(std.mem.endsWith(u8, captured(), "ms"));
+}
+
+test "StreamTrace.ok emits segment and audio metadata" {
+    var buf: [log_buf]u8 = undefined;
+    setEnabled(true);
+    defer setEnabled(false);
+    beginCapture(&buf);
+    defer endCapture();
+    const t = StreamTrace.begin(std.testing.io, "wss://api.deepgram.com/v1/listen");
+    t.ok("nova-3", 2, 3200);
+    try std.testing.expect(std.mem.indexOf(u8, captured(), "seg=2 audio=3200B") != null);
+}
+
+test "StreamTrace emitters are no-ops while logging is disabled" {
+    var buf: [log_buf]u8 = undefined;
+    setEnabled(false);
+    defer setEnabled(false);
+    beginCapture(&buf);
+    defer endCapture();
+    try std.testing.expect(!shouldLog(.debug));
+    try std.testing.expect(!shouldLog(.warn));
+    const t = StreamTrace.begin(std.testing.io, "wss://api.deepgram.com/v1/listen");
+    t.ok("nova-3", 2, 3200);
+    t.failed(error.StreamClosed);
+    try std.testing.expectEqual(@as(usize, 0), captured().len);
 }
