@@ -150,19 +150,52 @@ pub fn parseRestTranscript(gpa: std.mem.Allocator, json_body: []const u8) ![]u8 
     return try gpa.dupe(u8, std.mem.trimStart(u8, raw, " "));
 }
 
-/// Caller frees.
-pub fn transcribeRest(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, cfg: Config) ![]u8 {
-    const wav_bytes = try std.Io.Dir.cwd().readFileAlloc(io, wav_path, gpa, .limited(transcribe.wav_cap));
-    defer gpa.free(wav_bytes);
+/// Caller owns all fields and must call `deinit`.
+pub const RestRequest = struct {
+    /// Full Deepgram REST URL including query parameters. Allocated by `gpa`.
+    url: []u8,
+    /// `Authorization` value (`Token <api_key>`). Allocated by `gpa`; zeroed on `deinit`.
+    auth: []u8,
+    /// WAV bytes read from disk. Allocated by `gpa`.
+    body: []u8,
 
-    var detail_buf: [160]u8 = undefined;
-    const detail = std.fmt.bufPrint(&detail_buf, "model=\"{s}\" wav={d}B", .{ cfg.model, wav_bytes.len }) catch "detail unavailable";
-    const trace = log.ApiTrace.begin(io, "transcribe", cfg.rest_url, detail);
+    /// Frees `url`, `auth`, and `body`; zeros `auth` before freeing.
+    pub fn deinit(self: *RestRequest, gpa: std.mem.Allocator) void {
+        gpa.free(self.url);
+        @memset(self.auth, 0);
+        gpa.free(self.auth);
+        gpa.free(self.body);
+        self.* = undefined;
+    }
+};
+
+/// Builds the REST request so callers never post to the bare endpoint.
+/// Caller must call `req.deinit(gpa)`.
+pub fn prepareRestRequest(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, cfg: Config) !RestRequest {
+    const wav_bytes = try std.Io.Dir.cwd().readFileAlloc(io, wav_path, gpa, .limited(transcribe.wav_cap));
+    errdefer gpa.free(wav_bytes);
+
+    const url = try buildRestUrl(gpa, cfg);
+    errdefer gpa.free(url);
 
     const auth = try std.fmt.allocPrint(gpa, "Token {s}", .{cfg.api_key});
-    defer gpa.free(auth);
-    // Zero the key material before freeing (declared after the free, so it runs first).
-    defer @memset(auth, 0);
+    errdefer {
+        @memset(auth, 0);
+        gpa.free(auth);
+    }
+
+    return .{ .url = url, .auth = auth, .body = wav_bytes };
+}
+
+/// Caller frees.
+pub fn transcribeRest(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, cfg: Config) ![]u8 {
+    var req = try prepareRestRequest(io, gpa, wav_path, cfg);
+    defer req.deinit(gpa);
+
+    var detail_buf: [160]u8 = undefined;
+    const detail = std.fmt.bufPrint(&detail_buf, "model=\"{s}\" wav={d}B", .{ cfg.model, req.body.len }) catch "detail unavailable";
+    // Keep trace URL free of query/key material.
+    const trace = log.ApiTrace.begin(io, "transcribe", cfg.rest_url, detail);
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -171,13 +204,13 @@ pub fn transcribeRest(io: std.Io, gpa: std.mem.Allocator, wav_path: []const u8, 
     defer resp.deinit();
 
     const res = client.fetch(.{
-        .location = .{ .url = cfg.rest_url },
+        .location = .{ .url = req.url },
         .method = .POST,
         .headers = .{
-            .authorization = .{ .override = auth },
+            .authorization = .{ .override = req.auth },
             .content_type = .{ .override = "audio/wav" },
         },
-        .payload = wav_bytes,
+        .payload = req.body,
         .response_writer = &resp.writer,
     }) catch |err| {
         trace.failed(err);
@@ -335,6 +368,34 @@ test "parseRestTranscript extracts trimmed transcript and maps failures" {
     );
     try std.testing.expectError(error.MissingText, parseRestTranscript(gpa, "{}"));
     try std.testing.expectError(error.BadJson, parseRestTranscript(gpa, "not json"));
+}
+
+test "prepareRestRequest builds full REST URL, auth, and body" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const wav_path = "task3-deepgram-prepare.wav";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = wav_path, .data = "RIFF" });
+    defer std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
+
+    const cfg: Config = .{
+        .rest_url = default_rest_url,
+        .stream_url = "wss://api.deepgram.com/v1/listen",
+        .model = default_model,
+        .language = "",
+        .keyterms = &.{},
+        .api_key = "k123",
+    };
+
+    var req = try prepareRestRequest(io, gpa, wav_path, cfg);
+    defer req.deinit(gpa);
+
+    const want_url = try buildRestUrl(gpa, cfg);
+    defer gpa.free(want_url);
+    try std.testing.expectEqualStrings(want_url, req.url);
+    try std.testing.expect(std.mem.indexOf(u8, req.url, "model=nova-3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req.url, "language=multi") != null);
+    try std.testing.expectEqualStrings("Token k123", req.auth);
+    try std.testing.expectEqualStrings("RIFF", req.body);
 }
 
 test "transcribeRest against discard port fails without network" {
