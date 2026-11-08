@@ -767,8 +767,7 @@ pub fn main(init: std.process.Init) !void {
                     zhisper.audio.setRecording(.start, "") catch |err| {
                         daemon_log.debug("record start failed: {s}", .{@errorName(err)});
                         if (active_session) |s| {
-                            s.abort();
-                            s.deinit(gpa);
+                            s.deinitNoWait(gpa);
                             active_session = null;
                         }
                         loop_state.recording = false;
@@ -779,8 +778,7 @@ pub fn main(init: std.process.Init) !void {
                     daemon_log.info("cancelled recording", .{});
                     have_start = false;
                     if (active_session) |s| {
-                        s.abort();
-                        s.deinit(gpa);
+                        s.deinitNoWait(gpa);
                         active_session = null;
                     }
                     zhisper.audio.setRecording(.cancel, "") catch |err| {
@@ -794,6 +792,10 @@ pub fn main(init: std.process.Init) !void {
                     defer arena.free(wav_path);
                     zhisper.audio.setRecording(.stop, wav_path) catch |err| {
                         daemon_log.debug("record stop failed: {s}", .{@errorName(err)});
+                        if (active_session) |s| {
+                            s.deinitNoWait(gpa);
+                            active_session = null;
+                        }
                         continue;
                     };
                     if (active_session) |s| s.requestFinish();
@@ -804,20 +806,24 @@ pub fn main(init: std.process.Init) !void {
                         daemon_log.debug("discarded short press ({d}ns)", .{elapsed_ns});
                         report(io, &notify_queue, notify_level, .too_short, "");
                         if (active_session) |s| {
-                            s.abort();
-                            s.deinit(gpa);
+                            s.deinitNoWait(gpa);
                             active_session = null;
                         }
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
                         continue;
                     }
-                    const stat = std.Io.Dir.cwd().statFile(io, wav_path, .{}) catch continue;
+                    const stat = std.Io.Dir.cwd().statFile(io, wav_path, .{}) catch {
+                        if (active_session) |s| {
+                            s.deinitNoWait(gpa);
+                            active_session = null;
+                        }
+                        continue;
+                    };
                     if (stat.size < 44 + minWavPayloadBytes(cfg.daemon.min_duration_ms)) {
                         daemon_log.debug("discarded quiet clip ({d} bytes)", .{stat.size});
                         report(io, &notify_queue, notify_level, .quiet_clip, "");
                         if (active_session) |s| {
-                            s.abort();
-                            s.deinit(gpa);
+                            s.deinitNoWait(gpa);
                             active_session = null;
                         }
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
@@ -832,14 +838,13 @@ pub fn main(init: std.process.Init) !void {
                         queue.pending_session = null;
                         old_len = queue.pending_len;
                         @memcpy(old_buf[0..old_len], queue.pending_path[0..old_len]);
+                        queue.has_pending = false;
+                        queue.pending_len = 0;
                     }
                     queue.mutex.unlock(io);
                     if (old_len != 0) {
                         std.Io.Dir.cwd().deleteFile(io, old_buf[0..old_len]) catch {};
-                        if (old_session) |s| {
-                            s.abort();
-                            s.deinit(gpa);
-                        }
+                        if (old_session) |s| s.deinitNoWait(gpa);
                         daemon_log.debug("worker busy, dropped oldest clip", .{});
                         report(io, &notify_queue, notify_level, .dropped_oldest, "");
                     }
@@ -911,8 +916,7 @@ pub fn main(init: std.process.Init) !void {
     // Graceful shutdown: abandon an active recording (no WAV written),
     // let the worker finish at most current + one waiting job, then exit.
     if (active_session) |s| {
-        s.abort();
-        s.deinit(gpa);
+        s.deinitNoWait(gpa);
         active_session = null;
     }
     if (loop_state.recording) zhisper.audio.shutdown();

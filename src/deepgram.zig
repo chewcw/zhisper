@@ -370,6 +370,20 @@ pub const Session = struct {
         while (!self.settled() and waited < stop_wait_ms) : (waited += poll_ms) {
             self.io.sleep(.fromMilliseconds(poll_ms), .awake) catch {};
         }
+        self.detachAndRelease(gpa);
+    }
+
+    /// Non-blocking teardown for callers that do not read the transcript.
+    /// Aborts, detaches the thread, and drops the caller reference without
+    /// waiting and without joining. It must not touch the transcript, and it
+    /// must not touch `self` after the release. The thread drops its own
+    /// reference when it settles and frees the session if it is last.
+    pub fn deinitNoWait(self: *Session, gpa: std.mem.Allocator) void {
+        self.abort();
+        self.detachAndRelease(gpa);
+    }
+
+    fn detachAndRelease(self: *Session, gpa: std.mem.Allocator) void {
         if (self.thread) |t| t.detach();
         // Do not touch `self` after the release: the thread may free it.
         self.release(gpa);
@@ -848,4 +862,15 @@ test "deinit without finish returns promptly and frees the session" {
     s.deinit(gpa);
     const elapsed_ms = start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
     try std.testing.expect(elapsed_ms < 2000);
+}
+
+test "deinitNoWait returns without settling first and leaks nothing" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const s = try Session.startFake(gpa, "x");
+    // No finish/abort settling observed by caller; deinitNoWait must not wait.
+    s.deinitNoWait(gpa);
+    // The detached thread still runs and will free the session after seeing
+    // the abort flag; give it time so the leak checker sees no transient leak.
+    io.sleep(.fromMilliseconds(200), .awake) catch {};
 }
