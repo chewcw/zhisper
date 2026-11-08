@@ -1,5 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const ws = @import("websocket");
+
+pub const poll_ms: u32 = 50;
+pub const stop_wait_ms: u32 = 500;
 
 pub const Target = struct {
     tls: bool,
@@ -66,6 +70,8 @@ pub const Connection = struct {
     /// thread reads.
     mutex: std.Io.Mutex = .init,
     segments: std.ArrayList([]u8) = .empty,
+    /// Set by shutdown. The reader checks it between reads.
+    stop: bool = false,
     ended: bool = false,
     finishing: bool = false,
     client_ready: bool = false,
@@ -98,18 +104,57 @@ pub const Connection = struct {
         self.reader = try std.Thread.spawn(.{}, runReader, .{self});
     }
 
-    fn runReader(self: *Connection) void {
-        self.client.readLoop(self) catch {};
+    fn stopped(self: *Connection) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.stop;
     }
 
-    /// Called by the library read loop for each server message. Swallows
-    /// parse and allocation errors because a callback error stops the reader.
-    pub fn serverMessage(self: *Connection, data: []u8) !void {
+    fn isEnded(self: *Connection) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.ended;
+    }
+
+    fn waitForEnd(self: *Connection, timeout_ms: u32) void {
+        const deadline_step_ms: u32 = 10;
+        var waited: u32 = 0;
+        while (waited < timeout_ms) {
+            if (self.isEnded()) return;
+            self.io.sleep(.fromMilliseconds(deadline_step_ms), .awake) catch {};
+            waited += deadline_step_ms;
+        }
+    }
+
+    // The reader owns socket/TLS teardown. websocket.zig frees the TLS client
+    // and its buffers inside Client.close()/Stream.close() (the TLS arena), so
+    // closing the client from another thread while a read is in flight lets the
+    // reader return into freed TLS state. runReader therefore exits on its own
+    // (timed read sees the stop flag) and deinit tears the client down only
+    // after the reader thread has ended.
+    fn runReader(self: *Connection) void {
+        // A timed read returns null instead of blocking, so the loop can see
+        // `stop`. On Windows the library ignores this timeout.
+        self.client.readTimeout(poll_ms) catch {};
+        while (!self.stopped()) {
+            const msg = self.client.read() catch break orelse continue;
+            defer self.client.done(msg);
+            switch (msg.type) {
+                .text, .binary => self.onMessage(msg.data),
+                .ping => self.client.writePong(msg.data) catch {},
+                .pong => {},
+                .close => break,
+            }
+        }
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.ended = true;
+    }
+
+    fn onMessage(self: *Connection, data: []u8) void {
         const text = parseStreamMessage(self.gpa, data) orelse return;
         defer self.gpa.free(text);
 
-        // Transfer ownership via a copy so the segment list owns stable
-        // allocations freed in deinit/takeTranscript's join path context.
         const owned = self.gpa.dupe(u8, text) catch return;
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -117,13 +162,6 @@ pub const Connection = struct {
             self.gpa.free(owned);
             return;
         };
-    }
-
-    /// Called by the library read loop exactly once, on every exit path.
-    pub fn close(self: *Connection) void {
-        self.mutex.lockUncancelable(self.io);
-        defer self.mutex.unlock(self.io);
-        self.ended = true;
     }
 
     pub fn pump(self: *Connection, pcm: []u8) !void {
@@ -154,21 +192,32 @@ pub const Connection = struct {
     }
 
     pub fn shutdown(self: *Connection) void {
-        {
-            self.mutex.lockUncancelable(self.io);
-            defer self.mutex.unlock(self.io);
-            self.finishing = true;
-        }
-        if (self.client_ready) {
-            self.client.close(.{}) catch {};
-        }
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.stop = true;
+        self.finishing = true;
     }
 
+    // The reader owns socket/TLS teardown (see runReader). deinit requests a
+    // stop, waits for the reader to exit, and only then destroys the client.
+    // websocket.zig frees the TLS arena in Client.close(), so client.deinit()
+    // must not run while a read is in flight. On Windows a blocked read ignores
+    // readTimeout, so if the reader is still running after the wait we force
+    // Client.close() to unblock it and wait again before joining; Client.deinit()
+    // after Client.close() is safe because closeStream skips a second close once
+    // the stream is already closed.
     pub fn deinit(self: *Connection) void {
         self.shutdown();
-        if (self.reader) |t| {
-            t.join();
-            self.reader = null;
+        if (self.reader != null) {
+            self.waitForEnd(stop_wait_ms);
+            if (builtin.os.tag == .windows and !self.isEnded() and self.client_ready) {
+                self.client.close(.{}) catch {};
+                self.waitForEnd(stop_wait_ms);
+            }
+            if (self.reader) |t| {
+                t.join();
+                self.reader = null;
+            }
         }
         if (self.client_ready) {
             self.client.deinit();
@@ -313,6 +362,8 @@ test "joinSegments: empty list returns empty string" {
 }
 
 test "Connection: live Deepgram upgrade (opt-in)" {
+    const live = std.c.getenv("DEEPGRAM_LIVE") orelse return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(live), "1")) return error.SkipZigTest;
     const key = std.c.getenv("DEEPGRAM_API_KEY") orelse return error.SkipZigTest;
     const api_key = std.mem.span(key);
     if (api_key.len == 0) return error.SkipZigTest;
