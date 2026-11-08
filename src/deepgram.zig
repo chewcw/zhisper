@@ -253,9 +253,8 @@ pub const Session = struct {
     transcript: []u8 = "",
     finish_requested: bool = false,
     abort_requested: bool = false,
-    /// Set by deinit when the thread is still inside a blocking call and cannot be
-    /// joined. The thread frees the session and its owned memory on exit instead.
-    abandoned: bool = false,
+    /// Reference count: 1 caller + 1 thread, guarded by `mutex`.
+    refs: u32 = 1,
     thread: ?std.Thread = null,
     mutex: std.Io.Mutex = .init,
 
@@ -266,8 +265,9 @@ pub const Session = struct {
             .gpa = gpa,
             .cfg = cfg,
             .state = .connecting,
+            .refs = 2,
         };
-        self.thread = std.Thread.spawn(.{}, Session.run, .{self}) catch |e| {
+        self.thread = std.Thread.spawn(.{}, Session.runEntry, .{self}) catch |e| {
             gpa.destroy(self);
             return e;
         };
@@ -291,8 +291,9 @@ pub const Session = struct {
             },
             .fake = owned,
             .state = .connecting,
+            .refs = 2,
         };
-        self.thread = std.Thread.spawn(.{}, Session.run, .{self}) catch |e| {
+        self.thread = std.Thread.spawn(.{}, Session.runEntry, .{self}) catch |e| {
             gpa.free(owned);
             gpa.destroy(self);
             return e;
@@ -315,8 +316,9 @@ pub const Session = struct {
             },
             .fake_error = cause,
             .state = .connecting,
+            .refs = 2,
         };
-        self.thread = std.Thread.spawn(.{}, Session.run, .{self}) catch |e| {
+        self.thread = std.Thread.spawn(.{}, Session.runEntry, .{self}) catch |e| {
             gpa.destroy(self);
             return e;
         };
@@ -354,28 +356,21 @@ pub const Session = struct {
     }
 
     /// `gpa` must be the allocator passed to `start`/`startFake`/`startFakeFailing`.
-    /// Waits briefly for a terminal state, then joins. A Zig join cannot be
-    /// interrupted, so if the thread is still inside a connect or stalled write the
-    /// session is marked abandoned, the thread is detached, and the thread frees the
-    /// session and its owned memory on exit.
+    /// The struct must not be used after `deinit` returns.
+    /// Waits briefly for a terminal state, detaches the thread (never joins — a Zig
+    /// join cannot be interrupted, so deinit must not block on a connect or a stalled
+    /// write), then drops the caller reference. The thread drops its own reference as
+    /// its last action in `runEntry`, after all `defer`s in `run`; whoever drops the
+    /// last reference frees the transcript, the fake, and the session.
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         self.abort();
         var waited: u32 = 0;
         while (!self.settled() and waited < stop_wait_ms) : (waited += poll_ms) {
             self.io.sleep(.fromMilliseconds(poll_ms), .awake) catch {};
         }
-        if (self.settled()) {
-            if (self.thread) |t| t.join();
-            self.freeOwned(gpa);
-            gpa.destroy(self);
-            return;
-        }
-        // Still running: the join cannot be interrupted, so hand ownership to the
-        // thread instead of blocking the caller on a connect or a stalled write.
-        self.mutex.lockUncancelable(self.io);
-        self.abandoned = true;
-        self.mutex.unlock(self.io);
         if (self.thread) |t| t.detach();
+        // Do not touch `self` after the release: the thread may free it.
+        self.release(gpa);
     }
 
     fn settled(self: *Session) bool {
@@ -397,16 +392,27 @@ pub const Session = struct {
         self.transcript = transcript;
     }
 
-    /// If deinit detached this session, the thread must free it and touch nothing after.
-    fn maybeAbandonExit(self: *Session) bool {
+    /// Drops one reference (guarded by `mutex`). The last drop frees the
+    /// transcript/fake and destroys the session; nothing may touch `self` after.
+    fn release(self: *Session, gpa: std.mem.Allocator) void {
         self.mutex.lockUncancelable(self.io);
-        const abandoned = self.abandoned;
+        self.refs -= 1;
+        const last = self.refs == 0;
         self.mutex.unlock(self.io);
-        if (!abandoned) return false;
-        const gpa = self.gpa;
-        self.freeOwned(gpa);
+        if (!last) return;
+        if (self.transcript.len != 0) gpa.free(self.transcript);
+        if (self.fake) |f| gpa.free(f);
         gpa.destroy(self);
-        return true;
+    }
+
+    /// Thread entry: detach happens in `deinit` so it never joins and never blocks on
+    /// a 5 s connect or a stalled write. The thread's `release` is its last action and
+    /// runs only after `run` returns, so every `defer` in `run` (e.g. `conn.deinit()`,
+    /// the stream-URL free) has completed. Whichever side releases last frees, so
+    /// nothing leaks and no thread frees the struct while another is inside it.
+    fn runEntry(self: *Session) void {
+        self.run();
+        self.release(self.gpa);
     }
 
     fn flags(self: *Session) struct { finish: bool, abort_req: bool } {
@@ -426,7 +432,6 @@ pub const Session = struct {
 
         const query_url = buildStreamUrl(self.gpa, self.cfg) catch |e| {
             self.settle(.failed, e, "");
-            _ = self.maybeAbandonExit();
             return;
         };
         defer self.gpa.free(query_url);
@@ -436,7 +441,6 @@ pub const Session = struct {
         conn.open(query_url, self.cfg.api_key) catch {
             trace.failed(error.StreamClosed);
             self.settle(.failed, error.StreamClosed, "");
-            _ = self.maybeAbandonExit();
             return;
         };
         defer conn.deinit();
@@ -457,7 +461,6 @@ pub const Session = struct {
                 conn.pump(bytes) catch {
                     trace.failed(error.StreamClosed);
                     self.settle(.failed, error.StreamClosed, "");
-                    if (self.maybeAbandonExit()) return;
                     return;
                 };
                 cursor += n;
@@ -477,7 +480,6 @@ pub const Session = struct {
                     conn.pump(bytes2) catch {
                         trace.failed(error.StreamClosed);
                         self.settle(.failed, error.StreamClosed, "");
-                        if (self.maybeAbandonExit()) return;
                         return;
                     };
                     cursor += n2;
@@ -487,7 +489,6 @@ pub const Session = struct {
                 conn.sendText(&close_msg) catch {
                     trace.failed(error.StreamClosed);
                     self.settle(.failed, error.StreamClosed, "");
-                    if (self.maybeAbandonExit()) return;
                     return;
                 };
                 conn.markFinishing();
@@ -503,12 +504,10 @@ pub const Session = struct {
                 const transcript = conn.takeTranscript(self.gpa) catch |e| {
                     trace.failed(e);
                     self.settle(.failed, e, "");
-                    if (self.maybeAbandonExit()) return;
                     return;
                 };
                 trace.ok(self.cfg.model, segments, audio_bytes);
                 self.settle(.done, null, transcript);
-                _ = self.maybeAbandonExit();
                 return;
             }
 
@@ -516,7 +515,6 @@ pub const Session = struct {
             if (f.finish and finish_sent and deadline.durationTo(std.Io.Timestamp.now(self.io, .awake)).nanoseconds > 0) {
                 trace.failed(error.StreamTimeout);
                 self.settle(.failed, error.StreamTimeout, "");
-                _ = self.maybeAbandonExit();
                 return;
             }
 
@@ -525,7 +523,6 @@ pub const Session = struct {
                 conn.shutdown();
                 trace.failed(error.Aborted);
                 self.settle(.failed, error.Aborted, "");
-                _ = self.maybeAbandonExit();
                 return;
             }
 
@@ -533,7 +530,6 @@ pub const Session = struct {
             if (conn.state() == .failed) {
                 trace.failed(error.StreamClosed);
                 self.settle(.failed, error.StreamClosed, "");
-                _ = self.maybeAbandonExit();
                 return;
             }
 
@@ -546,7 +542,6 @@ pub const Session = struct {
                     conn.sendText(&ka) catch {
                         trace.failed(error.StreamClosed);
                         self.settle(.failed, error.StreamClosed, "");
-                        if (self.maybeAbandonExit()) return;
                         return;
                     };
                     last_keepalive = now;
@@ -563,23 +558,19 @@ pub const Session = struct {
             const f = self.flags();
             if (f.abort_req) {
                 self.settle(.failed, error.Aborted, "");
-                _ = self.maybeAbandonExit();
                 return;
             }
             if (f.finish) {
                 if (self.fake_error) |e| {
                     self.settle(.failed, e, "");
-                    _ = self.maybeAbandonExit();
                     return;
                 }
                 const src = self.fake orelse "";
                 const owned = self.gpa.dupe(u8, src) catch {
                     self.settle(.failed, error.OutOfMemory, "");
-                    _ = self.maybeAbandonExit();
                     return;
                 };
                 self.settle(.done, null, owned);
-                _ = self.maybeAbandonExit();
                 return;
             }
             self.io.sleep(.fromMilliseconds(poll_ms), .awake) catch {};
@@ -850,4 +841,14 @@ test "Session fake empty transcript returns empty slice" {
     s.requestFinish();
     const got = try s.awaitTranscript(io);
     try std.testing.expectEqual(@as(usize, 0), got.len);
+}
+
+test "deinit without finish returns promptly and frees the session" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const s = try Session.startFake(gpa, "x");
+    const start = std.Io.Timestamp.now(io, .awake);
+    s.deinit(gpa);
+    const elapsed_ms = start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
+    try std.testing.expect(elapsed_ms < 2000);
 }
