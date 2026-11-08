@@ -11,22 +11,22 @@ const help_text =
     \\ usage zhisper [options...]
     \\
     \\ options:
-    \\.  -h, --help                print this help and exit
-    \\.      --version             print version and exit
-    \\.      --config=<str>        config path (OS default)
-    \\.      --provider=<str>      groq|openai|custom|deepgram
-    \\.      --model=<str>         model (empty = preset)
-    \\.      --base-url=<str>      base URL (custom only)
-    \\.      --language=<str>      language tag (deepgram; empty = auto)
-    \\.      --key-code=<uint>     hotkey code (default 67=F9)
-    \\.      --mode=<str>          hold | toggle
-    \\.      --cancel-key-code=<uint>  cancel key
-    \\.      --evdev=<str>         Linux evdev path/name
-    \\.      --device=<str>        mic (empty = default)
-    \\.      --list-devices          list mics and exit
-    \\.      --wav-path=<str>      wav output path
-    \\.      --min-duration-ms=<uint>  min clip length
-    \\.  -v, --verbose             verbose logging
+    \\.  -h, --help  print this help and exit
+    \\.      --version  print version and exit
+    \\.      --config=<str>  config file path (OS default if absent)
+    \\.      --provider=<str>  groq | openai | custom | deepgram
+    \\.      --model=<str>  model (empty = preset)
+    \\.      --base-url=<str>  base URL (provider=custom only)
+    \\.      --language=<str>  language tag (deepgram; empty = auto)
+    \\.      --key-code=<uint>  hotkey code (default 67=F9)
+    \\.      --mode=<str>  hold | toggle
+    \\.      --cancel-key-code=<uint>  cancel key (0=off, 46=C)
+    \\.      --evdev=<str>  Linux evdev path/name:DEV
+    \\.      --device=<str>  mic (empty = default)
+    \\.      --list-devices  list mics and exit
+    \\.      --wav-path=<str>  wav output path
+    \\.      --min-duration-ms=<uint>  drop clips below length (ms)
+    \\.  -v, --verbose  verbose logging
     \\
 ;
 
