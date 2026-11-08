@@ -30,9 +30,10 @@ pub fn presetFor(p: Provider) Preset {
     };
 }
 
-/// Maps ZHISPER_PROVIDER value to a provider. Null/unknown/groq -> groq except
-/// explicit "openai"/"custom"/"deepgram". Unknown strings map to custom so a typo surfaces
-/// as MissingBaseUrl (explicit URL required) instead of silently hitting Groq.
+/// Maps ZHISPER_PROVIDER value to a provider. Null/groq -> groq; explicit
+/// "openai"/"custom"/"deepgram" map to those providers. Unknown strings map to
+/// custom so a typo surfaces as MissingBaseUrl (explicit URL required) instead
+/// of silently hitting Groq.
 pub fn providerFromName(name: ?[]const u8) Provider {
     const n = name orelse return .groq;
     if (std.mem.eql(u8, n, "deepgram")) return .deepgram;

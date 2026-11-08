@@ -242,6 +242,22 @@ pub const stop_wait_ms: u32 = 500;
 
 const pump_samples: usize = 800;
 
+/// Upper sample index the pump may read. Without a recorded stop count the
+/// bound is unlimited; with one it never passes the capture count at finish, so
+/// audio from the next recording cannot be pumped after CloseStream.
+pub fn pumpLimit(cursor: usize, stop_count: ?usize) usize {
+    const stop = stop_count orelse return std.math.maxInt(usize);
+    return if (cursor >= stop) cursor else stop;
+}
+
+fn pumpSamples(cursor: usize, stop_count: ?usize, frame: []i16) usize {
+    const limit = pumpLimit(cursor, stop_count);
+    if (cursor >= limit) return 0;
+    const room = @min(frame.len, limit - cursor);
+    if (room == 0) return 0;
+    return audio.copySamplesFrom(cursor, frame[0..room]);
+}
+
 pub const Session = struct {
     io: std.Io,
     gpa: std.mem.Allocator,
@@ -253,6 +269,10 @@ pub const Session = struct {
     transcript: []u8 = "",
     finish_requested: bool = false,
     abort_requested: bool = false,
+    /// Capture sample count recorded when finish is requested. The pump never
+    /// reads past it so audio from the next recording (which reuses the same
+    /// buffer) cannot land on the socket after CloseStream.
+    stop_sample_count: ?usize = null,
     /// Reference count: 1 caller + 1 thread, guarded by `mutex`.
     refs: u32 = 1,
     thread: ?std.Thread = null,
@@ -328,8 +348,12 @@ pub const Session = struct {
     }
 
     pub fn requestFinish(self: *Session) void {
+        // Read the capture count before taking the session lock so the bound is
+        // never recorded after finish_requested becomes visible to the pump.
+        const stop_count = audio.sampleCount();
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
+        if (self.stop_sample_count == null) self.stop_sample_count = stop_count;
         self.finish_requested = true;
     }
 
@@ -426,10 +450,10 @@ pub const Session = struct {
         self.release(self.gpa);
     }
 
-    fn flags(self: *Session) struct { finish: bool, abort_req: bool } {
+    fn flags(self: *Session) struct { finish: bool, abort_req: bool, stop_count: ?usize } {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        return .{ .finish = self.finish_requested, .abort_req = self.abort_requested };
+        return .{ .finish = self.finish_requested, .abort_req = self.abort_requested, .stop_count = self.stop_sample_count };
     }
 
     fn setState(self: *Session, state: SessionState) void {
@@ -440,6 +464,12 @@ pub const Session = struct {
 
     fn run(self: *Session) void {
         if (self.fake != null or self.fake_error != null) return self.runFake();
+
+        // The vendored websocket client ignores read timeouts on Windows and its
+        // teardown frees TLS memory the blocked reader is still using, so there
+        // is no safe way to interrupt the reader. Windows uses the Deepgram batch
+        // endpoint instead of streaming.
+        if (comptime @import("builtin").os.tag == .windows) return self.settle(.failed, error.StreamUnsupported, "");
 
         const query_url = buildStreamUrl(self.gpa, self.cfg) catch |e| {
             self.settle(.failed, e, "");
@@ -465,27 +495,33 @@ pub const Session = struct {
         var last_keepalive = std.Io.Timestamp.now(self.io, .awake);
 
         while (true) {
-            // 1. Copy with copySamplesFrom; pump if n > 0.
-            const n = audio.copySamplesFrom(cursor, &frame);
-            if (n > 0) {
-                const bytes: []u8 = @constCast(std.mem.sliceAsBytes(frame[0..n]));
-                conn.pump(bytes) catch {
-                    trace.failed(error.StreamClosed);
-                    self.settle(.failed, error.StreamClosed, "");
-                    return;
-                };
-                cursor += n;
-                audio_bytes += n * 2;
-            }
-
             // Take flags out of the mutex once per iteration.
             const f = self.flags();
 
-            // 2. Finish requested and CloseStream not yet sent: drain, send CloseStream,
-            // then markFinishing only after a successful write.
+            // 1. Copy with copySamplesFrom; pump if n > 0. The pump stops once
+            // CloseStream has been sent and never reads past the capture count
+            // recorded at finish, so audio from the next recording (which reuses
+            // the same buffer) cannot reach the old socket.
+            if (!finish_sent) {
+                const n = pumpSamples(cursor, f.stop_count, &frame);
+                if (n > 0) {
+                    const bytes: []u8 = @constCast(std.mem.sliceAsBytes(frame[0..n]));
+                    conn.pump(bytes) catch {
+                        trace.failed(error.StreamClosed);
+                        self.settle(.failed, error.StreamClosed, "");
+                        return;
+                    };
+                    cursor += n;
+                    audio_bytes += n * 2;
+                }
+            }
+
+            // 2. Finish requested and CloseStream not yet sent: drain up to the
+            // recorded stop count, send CloseStream, then markFinishing only
+            // after a successful write.
             if (f.finish and !finish_sent) {
                 while (true) {
-                    const n2 = audio.copySamplesFrom(cursor, &frame);
+                    const n2 = pumpSamples(cursor, f.stop_count, &frame);
                     if (n2 == 0) break;
                     const bytes2: []u8 = @constCast(std.mem.sliceAsBytes(frame[0..n2]));
                     conn.pump(bytes2) catch {
@@ -869,10 +905,30 @@ test "deinitNoWait frees a settled session without waiting or leaking" {
     const io = std.testing.io;
     const s = try Session.startFake(gpa, "hello");
     s.requestFinish();
-    // Await so the session has settled and the thread has released its reference.
-    // No sleep: the caller reference is the last one, so deinitNoWait frees
-    // synchronously and std.testing.allocator proves no leak at test end.
-    const got = try s.awaitTranscript(io);
-    try std.testing.expectEqualStrings("hello", got);
+    // Poll for the settled state so the thread has released its reference
+    // (awaitTranscript cannot observe this because transcript memory is freed
+    // when the thread drops its ref). No sleep: once settled, the caller holds
+    // the last reference and deinitNoWait frees synchronously; std.testing.allocator
+    // proves no leak at test end.
+    while (true) {
+        s.mutex.lockUncancelable(io);
+        const st = s.state;
+        const refs = s.refs;
+        s.mutex.unlock(io);
+        if ((st == .done or st == .failed) and refs == 1) break;
+        try io.sleep(.fromMilliseconds(poll_ms), .awake);
+    }
     s.deinitNoWait(gpa);
+}
+
+// Deterministic regression for the pump bound (no threads, no socket): once a
+// finish count is recorded the pump must never read at or past it, so audio the
+// next recording writes into the reused buffer cannot reach the old socket.
+test "pumpLimit clamps the cursor to the recorded stop sample count" {
+    try std.testing.expectEqual(std.math.maxInt(usize), pumpLimit(0, null));
+    try std.testing.expectEqual(std.math.maxInt(usize), pumpLimit(42, null));
+    try std.testing.expectEqual(@as(usize, 10), pumpLimit(0, 10));
+    try std.testing.expectEqual(@as(usize, 10), pumpLimit(9, 10));
+    try std.testing.expectEqual(@as(usize, 10), pumpLimit(10, 10));
+    try std.testing.expectEqual(@as(usize, 15), pumpLimit(15, 10));
 }

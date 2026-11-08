@@ -238,6 +238,14 @@ pub fn copySamplesFrom(from: usize, dest: []i16) usize {
     return n;
 }
 
+/// Number of samples captured so far. Takes the spinlock so the count is
+/// consistent with what copySamplesFrom can read.
+pub fn sampleCount() usize {
+    lockSpin();
+    defer spin.unlock();
+    return samples.items.len;
+}
+
 test "cancel discards samples without writing a file" {
     const io = std.testing.io;
     try init(io, std.testing.allocator, "");

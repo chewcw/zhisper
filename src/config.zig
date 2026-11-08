@@ -309,7 +309,11 @@ pub fn validate(cfg: Config) !void {
         if (cfg.transcribe.base_url.len == 0) return error.MissingBaseUrl;
         if (cfg.transcribe.model.len == 0) return error.MissingModel;
     }
-    if (cfg.transcribe.language.len != 0 and !validLanguageTag(cfg.transcribe.language)) return error.InvalidLanguage;
+    // Language tags are a Deepgram setting; checking them for other providers
+    // would let an unrelated env var (e.g. ZHISPER_LANGUAGE) break startup.
+    if (std.mem.eql(u8, provider, "deepgram")) {
+        if (cfg.transcribe.language.len != 0 and !validLanguageTag(cfg.transcribe.language)) return error.InvalidLanguage;
+    }
     if (!std.mem.eql(u8, cfg.hotkey.mode, "hold") and !std.mem.eql(u8, cfg.hotkey.mode, "toggle")) return error.InvalidMode;
     const hotkey = keyCodeOf(cfg.hotkey.key_code) orelse return error.InvalidKeyCode;
     if (keyCodeOf(cfg.hotkey.cancel_key_code)) |cancel| {
@@ -957,9 +961,9 @@ test "applyEnv overlays transcribe language and keyterm" {
     try std.testing.expectEqualStrings("a,b", out.transcribe.keyterm);
 }
 
-test "validate accepts empty and valid language tags and rejects invalid tags" {
+test "validate accepts empty and valid language tags and rejects invalid tags for deepgram" {
     var cfg = defaultConfig();
-    cfg.transcribe.provider = "groq";
+    cfg.transcribe.provider = "deepgram";
     cfg.transcribe.language = "";
     try validate(cfg);
     cfg.transcribe.language = "en-US";
@@ -968,6 +972,13 @@ test "validate accepts empty and valid language tags and rejects invalid tags" {
     try std.testing.expectError(error.InvalidLanguage, validate(cfg));
     cfg.transcribe.language = "zh!";
     try std.testing.expectError(error.InvalidLanguage, validate(cfg));
+}
+
+test "validate ignores an invalid language tag for non-deepgram providers" {
+    var cfg = defaultConfig();
+    cfg.transcribe.provider = "groq";
+    cfg.transcribe.language = "en US";
+    try validate(cfg);
 }
 
 test "validLanguageTag follows the tag rules" {

@@ -74,7 +74,7 @@ zig build -Dtarget=aarch64-macos
 | `deepgram` | `DEEPGRAM_API_KEY` | `nova-3` | `https://api.deepgram.com/v1/listen` |
 | `custom` | `ZHISPER_API_KEY` | *you choose* | *you choose* (`base_url` required) |
 
-With the Deepgram provider, audio is sent over a WebSocket while the recording runs; the transcript is typed once after the hotkey is released. If the stream fails, zhisper falls back to the Deepgram batch endpoint.
+With the Deepgram provider, audio is sent over a WebSocket while the recording runs (on Linux and macOS); the transcript is typed once after the hotkey is released. If the stream fails, zhisper falls back to the Deepgram batch endpoint. On Windows the Deepgram path posts the saved WAV to the batch endpoint instead of streaming, because the streaming transport cannot interrupt a blocked read without freeing memory the reader still uses.
 
 Keys are **environment variables only**. Putting `api_key` in the config file is a hard startup error, by design.
 
@@ -110,7 +110,7 @@ usage zhisper [options...]
 
 options:
   -h, --help                     print this help and exit
-      --provider=<str>           groq | openai | custom
+      --provider=<str>           groq|openai|custom|deepgram
       --model=<str>              model (empty = preset)
       --base-url=<str>           base URL (provider=custom only)
       --prompt=<str>             transcription prompt
@@ -250,7 +250,7 @@ structure = "prose"      # prose | lists
 context = "general"      # general | email
 ```
 
-- The normalizer resolves its own API key in this order: `ZHISPER_API_KEY`, then `GROQ_API_KEY`, then `OPENAI_API_KEY`. It never receives the transcription provider's key.
+- The normalizer resolves its own API key in this order: `ZHISPER_API_KEY`, then `GROQ_API_KEY`, then `OPENAI_API_KEY`. It never reads or falls back to `DEEPGRAM_API_KEY`.
 - This section is **watched at runtime**: flip `enabled` and it takes effect within a second, no restart.
 - `base_url` can point at any OpenAI-compatible chat-completions endpoint, so the normalizer can run locally or on a different provider without recompiling.
 - The three axes are closed sets; a value outside them is rejected at startup because the prompt format was only trained on these combinations.

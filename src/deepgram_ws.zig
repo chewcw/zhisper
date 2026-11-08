@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const ws = @import("websocket");
 
 pub const poll_ms: u32 = 50;
@@ -66,13 +65,19 @@ pub const Connection = struct {
     gpa: std.mem.Allocator,
     client: ws.Client = undefined,
     reader: ?std.Thread = null,
-    /// Guards everything below: the reader thread writes, the session
-    /// thread reads.
+    /// Guards session/reader state below. The reader thread writes, the
+    /// session thread reads. Never hold this while taking `write_mutex`.
     mutex: std.Io.Mutex = .init,
+    /// Serialises socket writes: the reader answers pings while the session
+    /// pumps/sends text. The vendored client masks payloads in place and has no
+    /// internal lock. Held only for the write itself, never nested with `mutex`.
+    write_mutex: std.Io.Mutex = .init,
     segments: std.ArrayList([]u8) = .empty,
     /// Set by shutdown. The reader checks it between reads.
     stop: bool = false,
     ended: bool = false,
+    /// True only when the reader ended on a clean close frame.
+    ended_clean: bool = false,
     finishing: bool = false,
     client_ready: bool = false,
 
@@ -100,6 +105,9 @@ pub const Connection = struct {
             .timeout_ms = 5000,
             .headers = auth,
         });
+        // A peer that stops reading must not strand the writer forever; a timed
+        // write fails and the session settles instead of detaching a stuck thread.
+        self.client.writeTimeout(5000) catch {};
 
         self.reader = try std.Thread.spawn(.{}, runReader, .{self});
     }
@@ -134,24 +142,45 @@ pub const Connection = struct {
     // after the reader thread has ended.
     fn runReader(self: *Connection) void {
         // A timed read returns null instead of blocking, so the loop can see
-        // `stop`. On Windows the library ignores this timeout.
+        // `stop`. On Windows the session never starts streaming (the daemon gates
+        // on the OS before opening), so this loop is not the Windows teardown path.
         self.client.readTimeout(poll_ms) catch {};
+        var clean_close = false;
         while (!self.stopped()) {
             const msg = self.client.read() catch break orelse continue;
             defer self.client.done(msg);
             switch (msg.type) {
                 .text, .binary => self.onMessage(msg.data),
-                .ping => self.client.writePong(msg.data) catch {},
+                .ping => {
+                    self.write_mutex.lockUncancelable(self.io);
+                    self.client.writePong(msg.data) catch {};
+                    self.write_mutex.unlock(self.io);
+                },
                 .pong => {},
-                .close => break,
+                .close => {
+                    clean_close = true;
+                    break;
+                },
             }
         }
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        self.ended = true;
+        if (!self.ended) {
+            self.ended = true;
+            self.ended_clean = clean_close;
+        }
     }
 
     fn onMessage(self: *Connection, data: []u8) void {
+        if (isErrorMessage(self.gpa, data)) {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            // A server error is a failure even if CloseStream was sent: the
+            // reader will end and state() must not report .finished.
+            self.ended = true;
+            self.ended_clean = false;
+            return;
+        }
         const text = parseStreamMessage(self.gpa, data) orelse return;
         defer self.gpa.free(text);
 
@@ -165,10 +194,14 @@ pub const Connection = struct {
     }
 
     pub fn pump(self: *Connection, pcm: []u8) !void {
+        self.write_mutex.lockUncancelable(self.io);
+        defer self.write_mutex.unlock(self.io);
         try self.client.writeBin(pcm);
     }
 
     pub fn sendText(self: *Connection, text: []u8) !void {
+        self.write_mutex.lockUncancelable(self.io);
+        defer self.write_mutex.unlock(self.io);
         try self.client.writeText(text);
     }
 
@@ -182,7 +215,8 @@ pub const Connection = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         if (!self.ended) return .open;
-        return if (self.finishing) .finished else .failed;
+        if (self.ended_clean and self.finishing) return .finished;
+        return .failed;
     }
 
     pub fn takeTranscript(self: *Connection, gpa: std.mem.Allocator) ![]u8 {
@@ -204,28 +238,34 @@ pub const Connection = struct {
         self.finishing = true;
     }
 
-    // The reader owns socket/TLS teardown (see runReader). deinit requests a
-    // stop, waits for the reader to exit, and only then destroys the client.
-    // websocket.zig frees the TLS arena in Client.close(), so client.deinit()
-    // must not run while a read is in flight. On Windows a blocked read ignores
-    // readTimeout, so if the reader is still running after the wait we force
-    // Client.close() to unblock it and wait again before joining; Client.deinit()
-    // after Client.close() is safe because closeStream skips a second close once
-    // the stream is already closed.
+    /// Test seam: set the reader-end flags directly so state() transitions are
+    /// deterministic without a live socket. Never used in production.
+    pub fn setEndedForTest(self: *Connection, clean: bool, finishing: bool) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        self.ended = true;
+        self.ended_clean = clean;
+        self.finishing = finishing;
+    }
+
     pub fn deinit(self: *Connection) void {
         self.shutdown();
         if (self.reader != null) {
             self.waitForEnd(stop_wait_ms);
-            if (builtin.os.tag == .windows and !self.isEnded() and self.client_ready) {
-                self.client.close(.{}) catch {};
-                self.waitForEnd(stop_wait_ms);
-            }
             if (self.reader) |t| {
                 t.join();
                 self.reader = null;
             }
         }
+        // The reader owns socket/TLS teardown and has exited above, so closing
+        // the client here cannot race a read. The write lock keeps this ordered
+        // with any writer that may still unwind, though the session thread
+        // normally outlives the connection. Windows never starts streaming (the
+        // session gates on the OS before open), so no force-close path is needed.
         if (self.client_ready) {
+            self.write_mutex.lockUncancelable(self.io);
+            self.client.close(.{}) catch {};
+            self.write_mutex.unlock(self.io);
             self.client.deinit();
             self.client_ready = false;
         }
@@ -234,6 +274,16 @@ pub const Connection = struct {
         self.segments = .empty;
     }
 };
+
+fn isErrorMessage(gpa: std.mem.Allocator, body: []const u8) bool {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, body, .{}) catch return false;
+    defer parsed.deinit();
+    const root = parsed.value;
+    if (root != .object) return false;
+    const type_val = root.object.get("type") orelse return false;
+    if (type_val != .string) return false;
+    return std.mem.eql(u8, type_val.string, "Error");
+}
 
 /// Returns the raw transcript of a Results message when is_final is true.
 /// Caller frees the result. Returns null for non-final/other types/malformed.
@@ -378,4 +428,24 @@ test "Connection: live Deepgram upgrade (opt-in)" {
     try conn.open("wss://api.deepgram.com/v1/listen?model=nova-3", api_key);
     conn.shutdown();
     conn.deinit();
+}
+
+test "state is open before an end" {
+    var conn: Connection = .{ .io = std.testing.io, .gpa = std.testing.allocator };
+    defer conn.deinit();
+    try std.testing.expectEqual(EndState.open, conn.state());
+}
+
+test "state is finished for a clean end with finishing set" {
+    var conn: Connection = .{ .io = std.testing.io, .gpa = std.testing.allocator };
+    defer conn.deinit();
+    conn.setEndedForTest(true, true);
+    try std.testing.expectEqual(EndState.finished, conn.state());
+}
+
+test "state is failed for an error end even with finishing set" {
+    var conn: Connection = .{ .io = std.testing.io, .gpa = std.testing.allocator };
+    defer conn.deinit();
+    conn.setEndedForTest(false, true);
+    try std.testing.expectEqual(EndState.failed, conn.state());
 }
