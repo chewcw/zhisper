@@ -74,10 +74,18 @@ fn resolveWavPath(gpa: std.mem.Allocator, configured: []const u8) ![]u8 {
     return wavPathIn(gpa, null);
 }
 
+/// WHY the empty check: config.validate only requires base_url/model for
+/// `custom`, because groq/openai/deepgram are meant to fall back to their
+/// preset. Copying the raw values would send an empty request URL and model for
+/// those three, so empty means "use the preset" here too - the same rule as
+/// buildDeepgramConfig and transcribe.resolveConfig, which treat a null override
+/// the same way.
 fn buildTranscribeConfig(unified: zhisper.config.Config, api_key: []const u8) zhisper.transcribe.Config {
+    const provider = zhisper.transcribe.providerFromName(unified.transcribe.provider);
+    const preset = zhisper.transcribe.presetFor(provider);
     return .{
-        .base_url = unified.transcribe.base_url,
-        .model = unified.transcribe.model,
+        .base_url = if (unified.transcribe.base_url.len == 0) preset.base_url else unified.transcribe.base_url,
+        .model = if (unified.transcribe.model.len == 0) preset.model else unified.transcribe.model,
         .api_key = api_key,
         .prompt = unified.transcribe.prompt,
     };
@@ -979,6 +987,22 @@ test "buildTranscribeConfig copies provider fields plus key" {
     try std.testing.expectEqualStrings("m", t.model);
     try std.testing.expectEqualStrings("k123", t.api_key);
     try std.testing.expectEqualStrings("p", t.prompt);
+}
+
+test "buildTranscribeConfig falls back to the provider preset for empty url and model" {
+    // The shipped config.example.toml leaves both empty, so this is the path
+    // every groq/openai user takes.
+    const groq = buildTranscribeConfig(.{
+        .transcribe = .{ .provider = "groq", .model = "", .base_url = "" },
+    }, "k123");
+    try std.testing.expectEqualStrings(zhisper.transcribe.default_base_url, groq.base_url);
+    try std.testing.expectEqualStrings("whisper-large-v3-turbo", groq.model);
+
+    const openai = buildTranscribeConfig(.{
+        .transcribe = .{ .provider = "openai", .model = "", .base_url = "" },
+    }, "k123");
+    try std.testing.expectEqualStrings("https://api.openai.com/v1/audio/transcriptions", openai.base_url);
+    try std.testing.expectEqualStrings("whisper-1", openai.model);
 }
 
 test "buildNormalizeConfig carries the endpoint override and all three axes" {
