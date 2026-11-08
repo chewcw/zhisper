@@ -300,9 +300,10 @@ pub fn validate(cfg: Config) !void {
     const provider = cfg.transcribe.provider;
     const known = std.mem.eql(u8, provider, "groq") or
         std.mem.eql(u8, provider, "openai") or
+        std.mem.eql(u8, provider, "deepgram") or
         std.mem.eql(u8, provider, "custom");
     if (!known) return error.InvalidProvider;
-    // groq/openai fall back to built-in presets, so empty model/base_url is
+    // groq/openai/deepgram fall back to built-in presets, so empty model/base_url is
     // fine; custom has no preset, so both are required.
     if (std.mem.eql(u8, provider, "custom")) {
         if (cfg.transcribe.base_url.len == 0) return error.MissingBaseUrl;
@@ -620,6 +621,14 @@ test "validate rejects custom without url and bad mode" {
     cfg.transcribe.model = "m";
     cfg.hotkey.mode = "bogus";
     try std.testing.expectError(error.InvalidMode, validate(cfg));
+}
+
+test "validate accepts deepgram with empty model and base_url" {
+    var cfg = defaultConfig();
+    cfg.transcribe.provider = "deepgram";
+    cfg.transcribe.model = "";
+    cfg.transcribe.base_url = "";
+    try validate(cfg);
 }
 
 test "example file parses clean" {
