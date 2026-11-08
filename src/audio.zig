@@ -57,6 +57,11 @@ fn dataCallback(p_device: ?*ma.ma_device, p_output: ?*anyopaque, p_input: ?*cons
     const frames: [*]const i16 = @ptrCast(@alignCast(input));
     lockSpin();
     defer spin.unlock();
+    // The lock-free gate can pass while the main thread is in stop: it stores
+    // capturing=false, then snapshots samples under this lock. Appending after
+    // that snapshot would add audio to the buffer that never made it into the
+    // WAV (and never reached the streaming socket), so recheck under the lock.
+    if (!capturing.load(.acquire)) return;
     samples.appendSlice(gpa_store, frames[0..frame_count]) catch {};
 }
 
@@ -213,9 +218,6 @@ pub fn setRecording(mode: RecordingMode, path: []const u8) !void {
             try wav.writeMono16(io_store, std.Io.Dir.cwd(), tmp_name, snapshot);
             errdefer std.Io.Dir.cwd().deleteFile(io_store, tmp_name) catch {};
             try std.Io.Dir.cwd().rename(tmp_name, std.Io.Dir.cwd(), path, io_store);
-            lockSpin();
-            samples.clearRetainingCapacity();
-            spin.unlock();
         },
     }
 }
@@ -224,6 +226,24 @@ fn appendStubSamplesForTest(data: []const i16) !void {
     lockSpin();
     defer spin.unlock();
     try samples.appendSlice(gpa_store, data);
+}
+
+pub fn copySamplesFrom(from: usize, dest: []i16) usize {
+    lockSpin();
+    defer spin.unlock();
+    if (from >= samples.items.len) return 0;
+    const available = samples.items.len - from;
+    const n = @min(available, dest.len);
+    @memcpy(dest[0..n], samples.items[from..][0..n]);
+    return n;
+}
+
+/// Number of samples captured so far. Takes the spinlock so the count is
+/// consistent with what copySamplesFrom can read.
+pub fn sampleCount() usize {
+    lockSpin();
+    defer spin.unlock();
+    return samples.items.len;
 }
 
 test "cancel discards samples without writing a file" {
@@ -343,4 +363,79 @@ test "findMatchIndex matches substring case-insensitively" {
 test "empty filter keeps default device" {
     try init(std.testing.io, std.testing.allocator, "");
     try std.testing.expect(!has_selected);
+}
+
+test "copySamplesFrom returns samples after stop" {
+    const io = std.testing.io;
+    try init(io, std.testing.allocator, "");
+    const prev_backend = backend;
+    defer backend = prev_backend;
+    backend = .{ .open = stubOpen, .close = stubClose };
+    defer {
+        samples.deinit(std.testing.allocator);
+        samples = .empty;
+    }
+    defer std.Io.Dir.cwd().deleteFile(io, "task2-retain.wav") catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, "task2-retain.wav.tmp") catch {};
+    capturing.store(false, .monotonic);
+    samples.clearRetainingCapacity();
+    try setRecording(.start, "ignored.wav");
+    try appendStubSamplesForTest(&[_]i16{ 0, 1000, -1000 });
+    try setRecording(.stop, "task2-retain.wav");
+    var dest: [8]i16 = undefined;
+    const n = copySamplesFrom(0, &dest);
+    try std.testing.expectEqual(@as(usize, 3), n);
+    try std.testing.expectEqualSlices(i16, &[_]i16{ 0, 1000, -1000 }, dest[0..n]);
+}
+
+test "start clears capture buffer" {
+    try init(std.testing.io, std.testing.allocator, "");
+    const prev_backend = backend;
+    defer backend = prev_backend;
+    backend = .{ .open = stubOpen, .close = stubClose };
+    defer {
+        samples.deinit(std.testing.allocator);
+        samples = .empty;
+    }
+    capturing.store(false, .monotonic);
+    samples.clearRetainingCapacity();
+    try appendStubSamplesForTest(&[_]i16{ 1, 2, 3 });
+    try setRecording(.start, "ignored.wav");
+    var dest: [8]i16 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), copySamplesFrom(0, &dest));
+    setRecording(.cancel, "") catch {};
+}
+
+test "copySamplesFrom past end returns zero" {
+    try init(std.testing.io, std.testing.allocator, "");
+    const prev_backend = backend;
+    defer backend = prev_backend;
+    backend = .{ .open = stubOpen, .close = stubClose };
+    defer {
+        samples.deinit(std.testing.allocator);
+        samples = .empty;
+    }
+    capturing.store(false, .monotonic);
+    samples.clearRetainingCapacity();
+    var dest: [8]i16 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), copySamplesFrom(99, &dest));
+}
+
+test "copySamplesFrom clamps to destination length" {
+    try init(std.testing.io, std.testing.allocator, "");
+    const prev_backend = backend;
+    defer backend = prev_backend;
+    backend = .{ .open = stubOpen, .close = stubClose };
+    defer {
+        samples.deinit(std.testing.allocator);
+        samples = .empty;
+    }
+    capturing.store(false, .monotonic);
+    samples.clearRetainingCapacity();
+    try setRecording(.start, "ignored.wav");
+    try appendStubSamplesForTest(&[_]i16{ 10, 20, 30 });
+    var dest: [1]i16 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), copySamplesFrom(1, &dest));
+    try std.testing.expectEqual(@as(i16, 20), dest[0]);
+    setRecording(.cancel, "") catch {};
 }

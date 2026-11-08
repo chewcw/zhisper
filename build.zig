@@ -48,6 +48,8 @@ pub fn build(b: *std.Build) void {
     mod.addCSourceFile(.{ .file = b.path("src/miniaudio.c") });
     const toml_dep = b.dependency("toml", .{ .target = target, .optimize = optimize });
     mod.addImport("toml", toml_dep.module("toml"));
+    const ws_dep = b.dependency("websocket", .{ .target = target, .optimize = optimize });
+    mod.addImport("websocket", ws_dep.module("websocket"));
     // SDL3 (vendored C sources, built per target). Imported on `mod` so the
     // overlay backend resolves in library builds too; under `is_test` the
     // backend is pruned before analysis, so test binaries need no display

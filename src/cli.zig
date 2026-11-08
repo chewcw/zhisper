@@ -11,21 +11,22 @@ const help_text =
     \\ usage zhisper [options...]
     \\
     \\ options:
-    \\.  -h, --help                print this help and exit
-    \\.      --version             print version and exit
-    \\.      --config=<str>        config file path (OS default if absent)
-    \\.      --provider=<str>      groq | openai | custom
-    \\.      --model=<str>         model (empty = preset)
-    \\.      --base-url=<str>      base URL (provider=custom only)
-    \\.      --key-code=<uint>     hotkey code (default 67=F9)
-    \\.      --mode=<str>          hold | toggle
+    \\.  -h, --help  print this help and exit
+    \\.      --version  print version and exit
+    \\.      --config=<str>  config file path (OS default if absent)
+    \\.      --provider=<str>  groq | openai | custom | deepgram
+    \\.      --model=<str>  model (empty = preset)
+    \\.      --base-url=<str>  base URL (provider=custom only)
+    \\.      --language=<str>  language tag (deepgram; empty = auto)
+    \\.      --key-code=<uint>  hotkey code (default 67=F9)
+    \\.      --mode=<str>  hold | toggle
     \\.      --cancel-key-code=<uint>  cancel key (0=off, 46=C)
-    \\.      --evdev=<str>         Linux evdev path/name:DEV
-    \\.      --device=<str>        mic (empty = default)
-    \\.      --list-devices          list mics and exit
-    \\.      --wav-path=<str>      wav output path
+    \\.      --evdev=<str>  Linux evdev path/name:DEV
+    \\.      --device=<str>  mic (empty = default)
+    \\.      --list-devices  list mics and exit
+    \\.      --wav-path=<str>  wav output path
     \\.      --min-duration-ms=<uint>  drop clips below length (ms)
-    \\.  -v, --verbose             verbose logging
+    \\.  -v, --verbose  verbose logging
     \\
 ;
 
@@ -44,6 +45,7 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.provider) |v| cli.provider = v;
     if (parsed.model) |v| cli.model = v;
     if (parsed.@"base-url") |v| cli.base_url = v;
+    if (parsed.language) |v| cli.language = v;
     if (parsed.@"key-code") |v| cli.key_code = std.math.cast(i16, v);
     if (parsed.mode) |v| cli.mode = v;
     if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(i16, v);
@@ -144,4 +146,24 @@ test "cli parses version flag" {
     const argv = [_][:0]const u8{ "zhisper", "--version" };
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqual(true, got.version);
+}
+
+test "cli parses --language and leaves it unset by default" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--language=zh" };
+    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqualStrings("zh", got.language.?);
+    var arena2 = std.heap.ArenaAllocator.init(gpa);
+    defer arena2.deinit();
+    const argv2 = [_][:0]const u8{"zhisper"};
+    const got2 = try parseCli(arena2.allocator(), std.testing.io, &argv2);
+    try std.testing.expect(got2.language == null);
+}
+
+// WHY this does not call parseCli: argz writes its diagnostic to stderr on a
+// parse error, and a passing test may not write to stderr in this repo.
+test "cli has no keyterm option" {
+    try std.testing.expect(std.mem.indexOf(u8, help_text, "keyterm") == null);
 }

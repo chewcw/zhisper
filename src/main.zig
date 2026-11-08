@@ -83,6 +83,66 @@ fn buildTranscribeConfig(unified: zhisper.config.Config, api_key: []const u8) zh
     };
 }
 
+fn buildDeepgramConfig(gpa: std.mem.Allocator, unified: zhisper.config.Config, api_key: []const u8) !zhisper.deepgram.Config {
+    const model = if (unified.transcribe.model.len == 0)
+        zhisper.deepgram.default_model
+    else
+        unified.transcribe.model;
+    const rest_url = if (unified.transcribe.base_url.len == 0)
+        zhisper.deepgram.default_rest_url
+    else
+        unified.transcribe.base_url;
+    const stream_url = try zhisper.deepgram.streamUrlFor(gpa, rest_url);
+    errdefer gpa.free(stream_url);
+    const keyterms = try zhisper.deepgram.parseKeyterms(gpa, unified.transcribe.keyterm);
+    return .{
+        .rest_url = rest_url,
+        .stream_url = stream_url,
+        .model = model,
+        .language = unified.transcribe.language,
+        .keyterms = keyterms,
+        .api_key = api_key,
+    };
+}
+
+fn firstKey(values: []const ?[]const u8) ?[]const u8 {
+    for (values) |v| {
+        const s = v orelse continue;
+        if (s.len == 0) continue;
+        return s;
+    }
+    return null;
+}
+
+fn resolveNormalizeKey() ?[]const u8 {
+    const vals = [_]?[]const u8{
+        if (std.c.getenv("ZHISPER_API_KEY")) |raw| blk: {
+            const s = std.mem.span(raw);
+            break :blk if (s.len == 0) null else s;
+        } else null,
+        if (std.c.getenv("GROQ_API_KEY")) |raw| blk: {
+            const s = std.mem.span(raw);
+            break :blk if (s.len == 0) null else s;
+        } else null,
+        if (std.c.getenv("OPENAI_API_KEY")) |raw| blk: {
+            const s = std.mem.span(raw);
+            break :blk if (s.len == 0) null else s;
+        } else null,
+    };
+    return firstKey(&vals);
+}
+
+fn transcribeBatch(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    wav_path: []const u8,
+    t_cfg: zhisper.transcribe.Config,
+    deepgram_cfg: ?zhisper.deepgram.Config,
+) ![]u8 {
+    if (deepgram_cfg) |d| return try zhisper.deepgram.transcribeRest(io, gpa, wav_path, d);
+    return try zhisper.transcribe.transcribeWithConfig(io, gpa, wav_path, t_cfg);
+}
+
 fn buildNormalizeConfig(unified: zhisper.config.Config, api_key: []const u8) zhisper.normalize.ResolutionError!zhisper.normalize.Config {
     var cfg = try zhisper.normalize.resolveConfig(unified.normalize.model, unified.normalize.base_url, api_key);
     // resolveConfig only fills in the endpoint and model, so the three axis
@@ -102,6 +162,7 @@ fn resolveApiKey(provider: zhisper.transcribe.Provider) ?[]const u8 {
     const name: [*:0]const u8 = switch (provider) {
         .groq => "GROQ_API_KEY",
         .openai => "OPENAI_API_KEY",
+        .deepgram => "DEEPGRAM_API_KEY",
         .custom => "ZHISPER_API_KEY",
     };
     if (std.c.getenv(name)) |raw| {
@@ -249,6 +310,8 @@ const WorkQueue = struct {
     // Output target of the waiting clip, written with pending_path under the
     // same lock so the worker can never see a path and the wrong sink.
     pending_sink: Sink = .typing,
+    // Streaming session for the waiting clip, owned by the queue once enqueued.
+    pending_session: ?*zhisper.deepgram.Session = null,
     // Set once by main on SIGINT/SIGTERM. Worker drains at most the active
     // plus one waiting job ("finish the sentence"), then exits.
     shutdown: bool = false,
@@ -257,8 +320,10 @@ const WorkQueue = struct {
 fn workerMain(
     io: std.Io,
     gpa: std.mem.Allocator,
+    session_gpa: std.mem.Allocator,
     cfg: zhisper.config.Config,
     api_key: []const u8,
+    deepgram_cfg: ?zhisper.deepgram.Config,
     q: *WorkQueue,
     normalize_flag: *std.atomic.Value(bool),
     clipboard_state: zhisper.clipboard.Clipboard,
@@ -282,6 +347,8 @@ fn workerMain(
         @memcpy(path_buf[0..len], q.pending_path[0..len]);
         // Copied under the lock, alongside the path it belongs to.
         const sink = q.pending_sink;
+        const session = q.pending_session;
+        q.pending_session = null;
         q.has_pending = false;
         q.active = true;
         q.mutex.unlock(io);
@@ -293,27 +360,47 @@ fn workerMain(
         const wav_path = path_buf[0..len];
         const t_cfg = buildTranscribeConfig(cfg, api_key);
         const transcribe_log = std.log.scoped(.transcribe);
-        const text = zhisper.transcribe.transcribeWithConfig(io, gpa, wav_path, t_cfg) catch |err| {
-            transcribe_log.debug("transcribe failed: {s}", .{@errorName(err)});
-            report(io, notify_queue, notify_level, .transcribe_failed, @errorName(err));
-            if (!cfg.daemon.keep_wav_on_error) std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
-            continue;
-        };
-        defer gpa.free(text);
+        // WHY two owners: a session transcript is freed by Session.deinit, while a
+        // batch transcript is freed here. Freeing both would double-free the first.
+        var from_session = false;
+        var text: []const u8 = undefined;
+        if (session) |s| {
+            if (s.awaitTranscript(io)) |t| {
+                text = t;
+                from_session = true;
+            } else |err| {
+                transcribe_log.debug("stream failed ({s}), using batch endpoint", .{@errorName(err)});
+            }
+        }
+        if (!from_session) {
+            text = transcribeBatch(io, gpa, wav_path, t_cfg, deepgram_cfg) catch |err| {
+                transcribe_log.debug("transcribe failed: {s}", .{@errorName(err)});
+                report(io, notify_queue, notify_level, .transcribe_failed, @errorName(err));
+                if (!cfg.daemon.keep_wav_on_error) std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
+                if (session) |s| s.deinit(session_gpa);
+                continue;
+            };
+        }
+        defer if (!from_session) gpa.free(text);
+        defer if (session) |s| s.deinit(session_gpa);
         // Normalization is best-effort and never blocks the dictation: every
         // failure path keeps the raw transcript. An empty raw transcript is
         // skipped entirely so silence does not cost a network round trip.
         var final_text = text;
         if (normalize_flag.load(.monotonic) and text.len > 0) {
             const normalize_log = std.log.scoped(.normalize);
-            if (buildNormalizeConfig(cfg, api_key)) |n_cfg| {
-                if (zhisper.normalize.normalizeWithConfig(io, gpa, text, n_cfg)) |clean| {
-                    final_text = clean;
+            if (resolveNormalizeKey()) |n_key| {
+                if (buildNormalizeConfig(cfg, n_key)) |n_cfg| {
+                    if (zhisper.normalize.normalizeWithConfig(io, gpa, text, n_cfg)) |clean| {
+                        final_text = clean;
+                    } else |err| {
+                        normalize_log.warn("normalize failed, using raw transcript: {s}", .{@errorName(err)});
+                    }
                 } else |err| {
-                    normalize_log.warn("normalize failed, using raw transcript: {s}", .{@errorName(err)});
+                    normalize_log.warn("normalize config invalid, using raw transcript: {s}", .{@errorName(err)});
                 }
-            } else |err| {
-                normalize_log.warn("normalize config invalid, using raw transcript: {s}", .{@errorName(err)});
+            } else {
+                normalize_log.warn("normalize config invalid, using raw transcript: {s}", .{@errorName(error.MissingApiKey)});
             }
         }
         const inject_log = std.log.scoped(.inject);
@@ -538,6 +625,13 @@ pub fn main(init: std.process.Init) !void {
         std.log.err("missing API key (set ZHISPER_API_KEY or provider key)", .{});
         std.process.exit(1);
     };
+    var d_cfg: ?zhisper.deepgram.Config = null;
+    if (provider == .deepgram) {
+        d_cfg = buildDeepgramConfig(arena, cfg, api_key) catch |err| {
+            std.log.err("deepgram config failed: {s}", .{@errorName(err)});
+            std.process.exit(1);
+        };
+    }
 
     var tray_live = false;
     if (cfg.daemon.tray) {
@@ -587,7 +681,7 @@ pub fn main(init: std.process.Init) !void {
     // Seeded from the config file's value at startup; the poll loop below
     // keeps it in sync.
     var normalize_flag = std.atomic.Value(bool).init(cfg.normalize.enabled);
-    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, cfg, api_key, &queue, &normalize_flag, clipboard_state, trailing_newline, &notify_queue, notify_level });
+    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, gpa, cfg, api_key, d_cfg, &queue, &normalize_flag, clipboard_state, trailing_newline, &notify_queue, notify_level });
 
     // WHY: the config is loaded once, but `normalize.enabled` is the escape
     // hatch a user reaches for the moment normalization mangles their text.
@@ -600,6 +694,7 @@ pub fn main(init: std.process.Init) !void {
     var loop_state = LoopState{ .mode = mode };
     var start_ts: std.Io.Clock.Timestamp = undefined;
     var have_start = false;
+    var active_session: ?*zhisper.deepgram.Session = null;
     var wav_counter: u32 = 0;
     const clipboard_label: []const u8 = if (clipboard_code == 0) "off" else "on";
     daemon_log.info("listening (mode={s}, key={d}, cancel={d}, search={d}, clipboard={s}, notify={s}{s})", .{
@@ -663,8 +758,18 @@ pub fn main(init: std.process.Init) !void {
                     daemon_log.info("start recording...", .{});
                     start_ts = std.Io.Clock.Timestamp.now(io, .awake);
                     have_start = true;
+                    if (d_cfg) |dc| {
+                        active_session = zhisper.deepgram.Session.start(io, gpa, dc) catch |err| blk: {
+                            daemon_log.debug("stream start failed: {s}", .{@errorName(err)});
+                            break :blk null;
+                        };
+                    }
                     zhisper.audio.setRecording(.start, "") catch |err| {
                         daemon_log.debug("record start failed: {s}", .{@errorName(err)});
+                        if (active_session) |s| {
+                            s.deinitNoWait(gpa);
+                            active_session = null;
+                        }
                         loop_state.recording = false;
                         have_start = false;
                     };
@@ -672,6 +777,10 @@ pub fn main(init: std.process.Init) !void {
                 .cancel => {
                     daemon_log.info("cancelled recording", .{});
                     have_start = false;
+                    if (active_session) |s| {
+                        s.deinitNoWait(gpa);
+                        active_session = null;
+                    }
                     zhisper.audio.setRecording(.cancel, "") catch |err| {
                         daemon_log.debug("record cancel failed: {s}", .{@errorName(err)});
                     };
@@ -683,39 +792,69 @@ pub fn main(init: std.process.Init) !void {
                     defer arena.free(wav_path);
                     zhisper.audio.setRecording(.stop, wav_path) catch |err| {
                         daemon_log.debug("record stop failed: {s}", .{@errorName(err)});
+                        if (active_session) |s| {
+                            s.deinitNoWait(gpa);
+                            active_session = null;
+                        }
                         continue;
                     };
+                    if (active_session) |s| s.requestFinish();
                     const now_ts = std.Io.Clock.Timestamp.now(io, .awake);
                     const elapsed_ns: u64 = if (have_start) @intCast(start_ts.durationTo(now_ts).raw.nanoseconds) else 0;
                     have_start = false;
                     if (elapsed_ns < @as(u64, cfg.daemon.min_duration_ms) * 1_000_000) {
                         daemon_log.debug("discarded short press ({d}ns)", .{elapsed_ns});
                         report(io, &notify_queue, notify_level, .too_short, "");
+                        if (active_session) |s| {
+                            s.deinitNoWait(gpa);
+                            active_session = null;
+                        }
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
                         continue;
                     }
-                    const stat = std.Io.Dir.cwd().statFile(io, wav_path, .{}) catch continue;
+                    const stat = std.Io.Dir.cwd().statFile(io, wav_path, .{}) catch {
+                        if (active_session) |s| {
+                            s.deinitNoWait(gpa);
+                            active_session = null;
+                        }
+                        continue;
+                    };
                     if (stat.size < 44 + minWavPayloadBytes(cfg.daemon.min_duration_ms)) {
                         daemon_log.debug("discarded quiet clip ({d} bytes)", .{stat.size});
                         report(io, &notify_queue, notify_level, .quiet_clip, "");
+                        if (active_session) |s| {
+                            s.deinitNoWait(gpa);
+                            active_session = null;
+                        }
                         std.Io.Dir.cwd().deleteFile(io, wav_path) catch {};
                         continue;
                     }
                     queue.mutex.lockUncancelable(io);
+                    var old_session: ?*zhisper.deepgram.Session = null;
+                    var old_len: usize = 0;
+                    var old_buf: [512]u8 = undefined;
                     if (queue.has_pending) {
-                        var old: [512]u8 = undefined;
-                        @memcpy(old[0..queue.pending_len], queue.pending_path[0..queue.pending_len]);
-                        const old_path = old[0..queue.pending_len];
-                        queue.mutex.unlock(io);
-                        std.Io.Dir.cwd().deleteFile(io, old_path) catch {};
+                        old_session = queue.pending_session;
+                        queue.pending_session = null;
+                        old_len = queue.pending_len;
+                        @memcpy(old_buf[0..old_len], queue.pending_path[0..old_len]);
+                        queue.has_pending = false;
+                        queue.pending_len = 0;
+                    }
+                    queue.mutex.unlock(io);
+                    if (old_len != 0) {
+                        std.Io.Dir.cwd().deleteFile(io, old_buf[0..old_len]) catch {};
+                        if (old_session) |s| s.deinitNoWait(gpa);
                         daemon_log.debug("worker busy, dropped oldest clip", .{});
                         report(io, &notify_queue, notify_level, .dropped_oldest, "");
-                        queue.mutex.lockUncancelable(io);
                     }
+                    queue.mutex.lockUncancelable(io);
                     const copy_len = @min(wav_path.len, queue.pending_path.len);
                     @memcpy(queue.pending_path[0..copy_len], wav_path[0..copy_len]);
                     queue.pending_len = copy_len;
                     queue.pending_sink = loop_state.sink;
+                    queue.pending_session = active_session;
+                    active_session = null;
                     queue.has_pending = true;
                     queue.mutex.unlock(io);
                 },
@@ -776,6 +915,10 @@ pub fn main(init: std.process.Init) !void {
 
     // Graceful shutdown: abandon an active recording (no WAV written),
     // let the worker finish at most current + one waiting job, then exit.
+    if (active_session) |s| {
+        s.deinitNoWait(gpa);
+        active_session = null;
+    }
     if (loop_state.recording) zhisper.audio.shutdown();
     queue.mutex.lockUncancelable(io);
     queue.shutdown = true;
@@ -1012,6 +1155,46 @@ test "std_options routes through env-gated logFn" {
     @import("zhisper").log.setEnabled(false);
     try std.testing.expect(@import("zhisper").log.shouldLog(.err));
     try std.testing.expect(!@import("zhisper").log.shouldLog(.debug));
+}
+
+test "buildDeepgramConfig uses defaults for empty transcribe settings" {
+    const gpa = std.testing.allocator;
+    const cfg = try buildDeepgramConfig(gpa, .{ .transcribe = .{} }, "k");
+    defer gpa.free(cfg.stream_url);
+    defer gpa.free(cfg.keyterms);
+    try std.testing.expectEqualStrings("https://api.deepgram.com/v1/listen", cfg.rest_url);
+    try std.testing.expectEqualStrings("wss://api.deepgram.com/v1/listen", cfg.stream_url);
+    try std.testing.expectEqualStrings("nova-3", cfg.model);
+    try std.testing.expectEqualStrings("", cfg.language);
+    try std.testing.expectEqual(@as(usize, 0), cfg.keyterms.len);
+}
+
+test "buildDeepgramConfig copies explicit values and derives stream URL" {
+    const gpa = std.testing.allocator;
+    const cfg = try buildDeepgramConfig(gpa, .{
+        .transcribe = .{
+            .model = "nova-3-general",
+            .base_url = "https://eu.api.deepgram.com/v1/listen",
+            .language = "zh",
+            .keyterm = "a, b",
+        },
+    }, "k");
+    defer gpa.free(cfg.stream_url);
+    defer gpa.free(cfg.keyterms);
+    try std.testing.expectEqualStrings("nova-3-general", cfg.model);
+    try std.testing.expectEqualStrings("https://eu.api.deepgram.com/v1/listen", cfg.rest_url);
+    try std.testing.expectEqualStrings("zh", cfg.language);
+    try std.testing.expectEqualStrings("wss://eu.api.deepgram.com/v1/listen", cfg.stream_url);
+    try std.testing.expectEqual(@as(usize, 2), cfg.keyterms.len);
+    try std.testing.expectEqualStrings("a", cfg.keyterms[0]);
+    try std.testing.expectEqualStrings("b", cfg.keyterms[1]);
+}
+
+test "firstKey returns first non-null non-empty value" {
+    const values = [_]?[]const u8{ null, "", "k2", "k3" };
+    try std.testing.expectEqualStrings("k2", firstKey(&values).?);
+    const none = [_]?[]const u8{ null, "" };
+    try std.testing.expect(firstKey(&none) == null);
 }
 
 test "notifyLevelFromString maps every config value" {
