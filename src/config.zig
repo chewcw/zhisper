@@ -8,6 +8,8 @@ pub const TranscribeCfg = struct {
     model: []const u8 = "",
     base_url: []const u8 = "",
     prompt: []const u8 = "",
+    language: []const u8 = "",
+    keyterm: []const u8 = "",
 };
 
 /// Optional post-transcription cleanup. Ships disabled so upgrading zhisper
@@ -124,6 +126,7 @@ pub const CliOverrides = struct {
     model: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
+    language: ?[]const u8 = null,
     key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
@@ -172,6 +175,10 @@ pub fn dupeConfig(gpa: std.mem.Allocator, cfg: Config) !Config {
     errdefer gpa.free(out.transcribe.base_url);
     out.transcribe.prompt = try gpa.dupe(u8, cfg.transcribe.prompt);
     errdefer gpa.free(out.transcribe.prompt);
+    out.transcribe.language = try gpa.dupe(u8, cfg.transcribe.language);
+    errdefer gpa.free(out.transcribe.language);
+    out.transcribe.keyterm = try gpa.dupe(u8, cfg.transcribe.keyterm);
+    errdefer gpa.free(out.transcribe.keyterm);
     out.normalize.model = try gpa.dupe(u8, cfg.normalize.model);
     errdefer gpa.free(out.normalize.model);
     out.normalize.base_url = try gpa.dupe(u8, cfg.normalize.base_url);
@@ -203,6 +210,8 @@ pub fn freeConfig(gpa: std.mem.Allocator, cfg: Config) void {
     gpa.free(cfg.transcribe.model);
     gpa.free(cfg.transcribe.base_url);
     gpa.free(cfg.transcribe.prompt);
+    gpa.free(cfg.transcribe.language);
+    gpa.free(cfg.transcribe.keyterm);
     gpa.free(cfg.normalize.model);
     gpa.free(cfg.normalize.base_url);
     gpa.free(cfg.normalize.styling);
@@ -221,6 +230,8 @@ pub const EnvValues = struct {
     model: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
+    language: ?[]const u8 = null,
+    keyterm: ?[]const u8 = null,
     key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
@@ -240,6 +251,8 @@ pub fn applyEnv(cfg: Config, env: EnvValues) Config {
     if (env.model) |v| out.transcribe.model = v;
     if (env.base_url) |v| out.transcribe.base_url = v;
     if (env.prompt) |v| out.transcribe.prompt = v;
+    if (env.language) |v| out.transcribe.language = v;
+    if (env.keyterm) |v| out.transcribe.keyterm = v;
     if (env.key_code) |v| out.hotkey.key_code = v;
     if (env.mode) |v| out.hotkey.mode = v;
     if (env.evdev) |v| out.hotkey.evdev = v;
@@ -260,6 +273,7 @@ pub fn applyCli(cfg: Config, cli: CliOverrides) Config {
         .model = cli.model,
         .base_url = cli.base_url,
         .prompt = cli.prompt,
+        .language = cli.language,
         .key_code = cli.key_code,
         .mode = cli.mode,
         .evdev = cli.evdev,
@@ -271,6 +285,15 @@ pub fn applyCli(cfg: Config, cli: CliOverrides) Config {
         .keep_wav_on_error = cli.keep_wav_on_error,
         .verbose = cli.verbose,
     });
+}
+
+pub fn validLanguageTag(tag: []const u8) bool {
+    if (tag.len == 0) return false;
+    for (tag) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-') continue;
+        return false;
+    }
+    return true;
 }
 
 pub fn validate(cfg: Config) !void {
@@ -285,6 +308,7 @@ pub fn validate(cfg: Config) !void {
         if (cfg.transcribe.base_url.len == 0) return error.MissingBaseUrl;
         if (cfg.transcribe.model.len == 0) return error.MissingModel;
     }
+    if (cfg.transcribe.language.len != 0 and !validLanguageTag(cfg.transcribe.language)) return error.InvalidLanguage;
     if (!std.mem.eql(u8, cfg.hotkey.mode, "hold") and !std.mem.eql(u8, cfg.hotkey.mode, "toggle")) return error.InvalidMode;
     const hotkey = keyCodeOf(cfg.hotkey.key_code) orelse return error.InvalidKeyCode;
     if (keyCodeOf(cfg.hotkey.cancel_key_code)) |cancel| {
@@ -350,6 +374,8 @@ pub fn readEnvValues() EnvValues {
         .model = envStr("ZHISPER_MODEL"),
         .base_url = envStr("ZHISPER_BASE_URL"),
         .prompt = envStr("ZHISPER_PROMPT"),
+        .language = envStr("ZHISPER_LANGUAGE"),
+        .keyterm = envStr("ZHISPER_KEYTERM"),
         .key_code = envI16("ZHISPER_KEY_CODE"),
         .mode = envStr("ZHISPER_MODE"),
         .evdev = envStr("ZHISPER_EVDEV"),
@@ -411,7 +437,7 @@ pub fn fileSignature(io: std.Io, path: []const u8) ?std.Io.File.Stat {
 // Every TOML key the file is allowed to contain. checkUnknownFields is the
 // single owner of this list; the struct definitions above own the values.
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
-    .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt" } },
+    .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt", "language", "keyterm" } },
     .{ .name = "normalize", .keys = &.{ "enabled", "model", "base_url", "styling", "structure", "context" } },
     .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code", "search_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
@@ -896,4 +922,60 @@ test "daemon notify rejects an unknown level" {
     const cfg = try parseFileConfig(gpa, io, "cfg-notify-bad.toml");
     defer freeConfig(gpa, cfg);
     try std.testing.expectError(error.InvalidNotifyLevel, validate(cfg));
+}
+
+test "parseFileConfig reads transcribe language and keyterm" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[transcribe]
+        \\language = "zh"
+        \\keyterm = "zhisper,deepgram"
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-lang-keyterm.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-lang-keyterm.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-lang-keyterm.toml");
+    defer freeConfig(gpa, cfg);
+    try std.testing.expectEqualStrings("zh", cfg.transcribe.language);
+    try std.testing.expectEqualStrings("zhisper,deepgram", cfg.transcribe.keyterm);
+}
+
+test "applyEnv overlays transcribe language and keyterm" {
+    const cfg = defaultConfig();
+    const out = applyEnv(cfg, .{ .language = "en-US", .keyterm = "a,b" });
+    try std.testing.expectEqualStrings("en-US", out.transcribe.language);
+    try std.testing.expectEqualStrings("a,b", out.transcribe.keyterm);
+}
+
+test "validate accepts empty and valid language tags and rejects invalid tags" {
+    var cfg = defaultConfig();
+    cfg.transcribe.provider = "groq";
+    cfg.transcribe.language = "";
+    try validate(cfg);
+    cfg.transcribe.language = "en-US";
+    try validate(cfg);
+    cfg.transcribe.language = "en US";
+    try std.testing.expectError(error.InvalidLanguage, validate(cfg));
+    cfg.transcribe.language = "zh!";
+    try std.testing.expectError(error.InvalidLanguage, validate(cfg));
+}
+
+test "validLanguageTag follows the tag rules" {
+    try std.testing.expect(!validLanguageTag(""));
+    try std.testing.expect(validLanguageTag("multi"));
+    try std.testing.expect(validLanguageTag("zh-Hans-2"));
+}
+
+test "parseFileConfig still rejects unknown transcribe keys after allowlist change" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[transcribe]
+        \\languge = "zh"
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-lang-typo.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-lang-typo.toml") catch {};
+    try std.testing.expectError(error.UnknownField, parseFileConfig(gpa, io, "cfg-lang-typo.toml"));
 }

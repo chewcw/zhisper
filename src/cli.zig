@@ -17,6 +17,7 @@ const help_text =
     \\.      --provider=<str>      groq | openai | custom
     \\.      --model=<str>         model (empty = preset)
     \\.      --base-url=<str>      base URL (provider=custom only)
+    \\.      --language=<str>      language tag (deepgram; empty = auto)
     \\.      --key-code=<uint>     hotkey code (default 67=F9)
     \\.      --mode=<str>          hold | toggle
     \\.      --cancel-key-code=<uint>  cancel key (0=off, 46=C)
@@ -44,6 +45,7 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.provider) |v| cli.provider = v;
     if (parsed.model) |v| cli.model = v;
     if (parsed.@"base-url") |v| cli.base_url = v;
+    if (parsed.language) |v| cli.language = v;
     if (parsed.@"key-code") |v| cli.key_code = std.math.cast(i16, v);
     if (parsed.mode) |v| cli.mode = v;
     if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(i16, v);
@@ -144,4 +146,26 @@ test "cli parses version flag" {
     const argv = [_][:0]const u8{ "zhisper", "--version" };
     const got = try parseCli(arena.allocator(), std.testing.io, &argv);
     try std.testing.expectEqual(true, got.version);
+}
+
+test "cli parses --language and leaves it unset by default" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--language=zh" };
+    const got = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqualStrings("zh", got.language.?);
+    var arena2 = std.heap.ArenaAllocator.init(gpa);
+    defer arena2.deinit();
+    const argv2 = [_][:0]const u8{"zhisper"};
+    const got2 = try parseCli(arena2.allocator(), std.testing.io, &argv2);
+    try std.testing.expect(got2.language == null);
+}
+
+test "cli rejects --keyterm as an unknown flag" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--keyterm=a" };
+    try std.testing.expectError(error.ArgvError, parseCli(arena.allocator(), std.testing.io, &argv));
 }
