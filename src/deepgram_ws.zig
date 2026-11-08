@@ -191,6 +191,12 @@ pub const Connection = struct {
         return try joinSegments(gpa, self.segments.items);
     }
 
+    pub fn segmentCount(self: *Connection) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.segments.items.len;
+    }
+
     pub fn shutdown(self: *Connection) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
