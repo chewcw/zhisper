@@ -276,8 +276,10 @@ pub const Session = struct {
 
     pub fn startFake(gpa: std.mem.Allocator, transcript: []const u8) !*Session {
         const self = try gpa.create(Session);
-        errdefer gpa.destroy(self);
-        const owned = try gpa.dupe(u8, transcript);
+        const owned = gpa.dupe(u8, transcript) catch |e| {
+            gpa.destroy(self);
+            return e;
+        };
         self.* = .{
             .io = std.testing.io,
             .gpa = gpa,
@@ -377,11 +379,6 @@ pub const Session = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         return self.state == .done or self.state == .failed;
-    }
-
-    fn freeOwned(self: *Session, gpa: std.mem.Allocator) void {
-        if (self.transcript.len != 0) gpa.free(self.transcript);
-        if (self.fake) |f| gpa.free(f);
     }
 
     fn settle(self: *Session, state: SessionState, err: ?anyerror, transcript: []u8) void {
