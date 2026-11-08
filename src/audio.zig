@@ -391,9 +391,7 @@ test "start clears capture buffer" {
     }
     capturing.store(false, .monotonic);
     samples.clearRetainingCapacity();
-    try setRecording(.start, "ignored.wav");
     try appendStubSamplesForTest(&[_]i16{ 1, 2, 3 });
-    try setRecording(.cancel, "");
     try setRecording(.start, "ignored.wav");
     var dest: [8]i16 = undefined;
     try std.testing.expectEqual(@as(usize, 0), copySamplesFrom(0, &dest));
