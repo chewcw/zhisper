@@ -38,9 +38,6 @@ var zstbi_ready = false;
 
 const xk_escape: c.KeySym = 0xFF1B;
 const menu_bg: c_ulong = 0x2b2b2b;
-const menu_fg: c_ulong = 0xe6e6e6;
-const menu_hover: c_ulong = 0x3c3c3c;
-const menu_dim: c_ulong = 0x6a6a6a;
 const menu_border: c_ulong = 0x505050;
 
 var host: ?types.MenuHost = null;
@@ -316,7 +313,6 @@ pub fn poll(_: std.Io) void {
 fn openMenu(d: *c.Display) void {
     const menu_host = host orelse return;
     if (menu_font == null) return;
-    _ = .{ menu_fg, menu_hover, menu_dim };
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
@@ -363,7 +359,7 @@ fn openMenu(d: *c.Display) void {
     }
     const keyboard_grabbed = c.XGrabKeyboard(d, menu_window, 0, c.GrabModeAsync, c.GrabModeAsync, c.CurrentTime) == c.GrabSuccess;
 
-    runMenuLoop(d, menu);
+    runMenuLoop(d);
 
     if (keyboard_grabbed) _ = c.XUngrabKeyboard(d, c.CurrentTime);
     _ = c.XUngrabPointer(d, c.CurrentTime);
@@ -381,8 +377,7 @@ fn closeMenuWindow(d: *c.Display) void {
     }
 }
 
-/// Background only until the row painter lands in a later commit.
-fn runMenuLoop(d: *c.Display, menu: tray_menu.Menu) void {
+fn runMenuLoop(d: *c.Display) void {
     while (true) {
         var event: c.XEvent = undefined;
         _ = c.XNextEvent(d, &event);
@@ -392,7 +387,6 @@ fn runMenuLoop(d: *c.Display, menu: tray_menu.Menu) void {
             c.KeyPress => if (c.XLookupKeysym(&event.xkey, 0) == xk_escape) return,
             else => {},
         }
-        _ = menu;
     }
 }
 
