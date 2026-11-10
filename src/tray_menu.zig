@@ -76,6 +76,17 @@ pub fn rowAt(menu: Menu, y: i32) ?usize {
     return index;
 }
 
+pub const Position = struct { x: i32, y: i32 };
+
+/// Shifts the menu left or up so it fits on the screen. On a screen smaller
+/// than the menu the result is 0, never negative.
+pub fn clampPos(x: i32, y: i32, w: i32, h: i32, screen_w: i32, screen_h: i32) Position {
+    return .{
+        .x = @max(0, @min(x, screen_w - w)),
+        .y = @max(0, @min(y, screen_h - h)),
+    };
+}
+
 fn choice(label: []const u8, action: Action, checked: bool, enabled: bool) Row {
     return .{ .item = .{
         .label = label,
@@ -299,4 +310,16 @@ test "normalize and overlay submenus carry booleans" {
     const normalize = try submenu(arena, .normalize, cfg, .{});
     try std.testing.expect(!itemAt(normalize, 1).action.set_normalize_enabled);
     try std.testing.expect(itemAt(normalize, 1).checked);
+}
+
+test "clampPos keeps the menu inside the screen and off the top-left edge" {
+    const Pos = Position;
+    try std.testing.expectEqual(Pos{ .x = 100, .y = 100 }, clampPos(100, 100, 200, 150, 1920, 1080));
+    try std.testing.expectEqual(Pos{ .x = 1720, .y = 930 }, clampPos(1900, 1070, 200, 150, 1920, 1080));
+    try std.testing.expectEqual(Pos{ .x = 0, .y = 0 }, clampPos(0, 0, 200, 150, 1920, 1080));
+}
+
+test "clampPos never returns a negative offset on a tiny screen" {
+    const Pos = Position;
+    try std.testing.expectEqual(Pos{ .x = 0, .y = 0 }, clampPos(50, 50, 400, 300, 320, 200));
 }
