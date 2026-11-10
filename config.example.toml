@@ -43,7 +43,7 @@ device = ""       # empty = system default mic
 # and fixes punctuation. Costs one extra network round trip, so it is off by
 # default. This section is watched at runtime: editing `enabled` here takes
 # effect within a second, no restart needed. No new key — it reuses
-# GROQ_API_KEY / ZHISPER_API_KEY.
+# GROQ_API_KEY / OPENAI_API_KEY.
 enabled = false
 model = ""        # empty = preset default (openai/gpt-oss-20b)
 base_url = ""     # empty = preset default; set to point at any OpenAI-compatible

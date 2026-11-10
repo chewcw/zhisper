@@ -18,15 +18,26 @@ pub const Provider = enum { groq, openai, deepgram, custom };
 pub const Preset = struct {
     base_url: []const u8,
     model: []const u8,
-    key_env: []const u8,
 };
 
 pub fn presetFor(p: Provider) Preset {
     return switch (p) {
-        .groq => .{ .base_url = default_base_url, .model = default_model, .key_env = "GROQ_API_KEY" },
-        .openai => .{ .base_url = "https://api.openai.com/v1/audio/transcriptions", .model = "whisper-1", .key_env = "OPENAI_API_KEY" },
-        .deepgram => .{ .base_url = "https://api.deepgram.com/v1/listen", .model = "nova-3", .key_env = "DEEPGRAM_API_KEY" },
-        .custom => .{ .base_url = "", .model = "", .key_env = "ZHISPER_API_KEY" },
+        .groq => .{ .base_url = default_base_url, .model = default_model },
+        .openai => .{ .base_url = "https://api.openai.com/v1/audio/transcriptions", .model = "whisper-1" },
+        .deepgram => .{ .base_url = "https://api.deepgram.com/v1/listen", .model = "nova-3" },
+        .custom => .{ .base_url = "", .model = "" },
+    };
+}
+
+/// The one place that maps a provider to its key variable. The return type is
+/// sentinel-terminated so callers pass it to `std.c.getenv` without an
+/// allocation, and so `{s}` formatting works without `std.mem.span`.
+pub fn keyEnvName(p: Provider) [:0]const u8 {
+    return switch (p) {
+        .groq => "GROQ_API_KEY",
+        .openai => "OPENAI_API_KEY",
+        .deepgram => "DEEPGRAM_API_KEY",
+        .custom => "CUSTOM_API_KEY",
     };
 }
 
@@ -69,17 +80,12 @@ fn envVal(name: [*:0]const u8) ?[]const u8 {
 }
 
 /// Single env entry point. Reads ZHISPER_PROVIDER (default groq),
-/// ZHISPER_MODEL / ZHISPER_BASE_URL overrides, and the key from
-/// ZHISPER_API_KEY first then the provider-specific var. Explicit args beat env.
+/// ZHISPER_MODEL / ZHISPER_BASE_URL overrides, and the key from the
+/// variable of the resolved provider (see keyEnvName). Explicit args beat env.
 pub fn configFromEnv(model_override: ?[]const u8, base_url_override: ?[]const u8) !Config {
     const provider = providerFromName(envVal("ZHISPER_PROVIDER"));
     const preset = presetFor(provider);
-    const key = envVal("ZHISPER_API_KEY") orelse switch (provider) {
-        .groq => envVal("GROQ_API_KEY"),
-        .openai => envVal("OPENAI_API_KEY"),
-        .deepgram => envVal("DEEPGRAM_API_KEY"),
-        .custom => envVal("ZHISPER_API_KEY"),
-    };
+    const key = envVal(keyEnvName(provider).ptr);
     const model_env = envVal("ZHISPER_MODEL");
     const url_env = envVal("ZHISPER_BASE_URL");
     return try resolveConfig(preset, key, model_override orelse model_env, base_url_override orelse url_env);
@@ -266,11 +272,9 @@ test "presetFor returns groq and openai presets" {
     const groq = presetFor(.groq);
     try std.testing.expectEqualStrings("https://api.groq.com/openai/v1/audio/transcriptions", groq.base_url);
     try std.testing.expectEqualStrings("whisper-large-v3-turbo", groq.model);
-    try std.testing.expectEqualStrings("GROQ_API_KEY", groq.key_env);
     const openai = presetFor(.openai);
     try std.testing.expectEqualStrings("https://api.openai.com/v1/audio/transcriptions", openai.base_url);
     try std.testing.expectEqualStrings("whisper-1", openai.model);
-    try std.testing.expectEqualStrings("OPENAI_API_KEY", openai.key_env);
 }
 
 test "providerFromName defaults groq, maps openai and custom" {
@@ -285,7 +289,19 @@ test "presetFor(.deepgram) returns the deepgram preset" {
     const deepgram = presetFor(.deepgram);
     try std.testing.expectEqualStrings("https://api.deepgram.com/v1/listen", deepgram.base_url);
     try std.testing.expectEqualStrings("nova-3", deepgram.model);
-    try std.testing.expectEqualStrings("DEEPGRAM_API_KEY", deepgram.key_env);
+}
+
+test "keyEnvName returns one variable per provider" {
+    try std.testing.expectEqualStrings("GROQ_API_KEY", keyEnvName(.groq));
+    try std.testing.expectEqualStrings("OPENAI_API_KEY", keyEnvName(.openai));
+    try std.testing.expectEqualStrings("DEEPGRAM_API_KEY", keyEnvName(.deepgram));
+    try std.testing.expectEqualStrings("CUSTOM_API_KEY", keyEnvName(.custom));
+}
+
+test "no provider reads the removed shared variable" {
+    for ([_]Provider{ .groq, .openai, .deepgram, .custom }) |p| {
+        try std.testing.expect(!std.mem.eql(u8, keyEnvName(p), "ZHISPER_API_KEY"));
+    }
 }
 
 test "providerFromName maps deepgram case-sensitively" {

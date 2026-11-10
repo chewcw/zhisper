@@ -122,21 +122,18 @@ fn firstKey(values: []const ?[]const u8) ?[]const u8 {
     return null;
 }
 
+/// Variables the normalizer tries, in order. A Deepgram or custom key must
+/// never reach the normalizer, which posts to Groq or OpenAI.
+const normalize_key_envs = [_][:0]const u8{ "GROQ_API_KEY", "OPENAI_API_KEY" };
+
 fn resolveNormalizeKey() ?[]const u8 {
-    const vals = [_]?[]const u8{
-        if (std.c.getenv("ZHISPER_API_KEY")) |raw| blk: {
+    var vals: [normalize_key_envs.len]?[]const u8 = undefined;
+    for (normalize_key_envs, 0..) |name, i| {
+        vals[i] = if (std.c.getenv(name.ptr)) |raw| blk: {
             const s = std.mem.span(raw);
             break :blk if (s.len == 0) null else s;
-        } else null,
-        if (std.c.getenv("GROQ_API_KEY")) |raw| blk: {
-            const s = std.mem.span(raw);
-            break :blk if (s.len == 0) null else s;
-        } else null,
-        if (std.c.getenv("OPENAI_API_KEY")) |raw| blk: {
-            const s = std.mem.span(raw);
-            break :blk if (s.len == 0) null else s;
-        } else null,
-    };
+        } else null;
+    }
     return firstKey(&vals);
 }
 
@@ -164,19 +161,9 @@ fn buildNormalizeConfig(unified: zhisper.config.Config, api_key: []const u8) zhi
 }
 
 fn resolveApiKey(provider: zhisper.transcribe.Provider) ?[]const u8 {
-    if (std.c.getenv("ZHISPER_API_KEY")) |raw| {
-        if (raw[0] != 0) return std.mem.span(raw);
-    }
-    const name: [*:0]const u8 = switch (provider) {
-        .groq => "GROQ_API_KEY",
-        .openai => "OPENAI_API_KEY",
-        .deepgram => "DEEPGRAM_API_KEY",
-        .custom => "ZHISPER_API_KEY",
-    };
-    if (std.c.getenv(name)) |raw| {
-        if (raw[0] != 0) return std.mem.span(raw);
-    }
-    return null;
+    const raw = std.c.getenv(zhisper.transcribe.keyEnvName(provider).ptr) orelse return null;
+    if (raw[0] == 0) return null;
+    return std.mem.span(raw);
 }
 
 fn resolveConfigPath(gpa: std.mem.Allocator) ![]u8 {
@@ -630,7 +617,10 @@ pub fn main(init: std.process.Init) !void {
 
     const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
     const api_key = resolveApiKey(provider) orelse {
-        std.log.err("missing API key (set ZHISPER_API_KEY or provider key)", .{});
+        std.log.err("missing API key: set {s} (provider = {s})", .{
+            zhisper.transcribe.keyEnvName(provider),
+            cfg.transcribe.provider,
+        });
         std.process.exit(1);
     };
     var d_cfg: ?zhisper.deepgram.Config = null;
@@ -1219,6 +1209,12 @@ test "firstKey returns first non-null non-empty value" {
     try std.testing.expectEqualStrings("k2", firstKey(&values).?);
     const none = [_]?[]const u8{ null, "" };
     try std.testing.expect(firstKey(&none) == null);
+}
+
+test "normalizer key order is groq then openai" {
+    try std.testing.expectEqual(@as(usize, 2), normalize_key_envs.len);
+    try std.testing.expectEqualStrings("GROQ_API_KEY", normalize_key_envs[0]);
+    try std.testing.expectEqualStrings("OPENAI_API_KEY", normalize_key_envs[1]);
 }
 
 test "notifyLevelFromString maps every config value" {
