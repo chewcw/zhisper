@@ -39,11 +39,20 @@ var zstbi_ready = false;
 const xk_escape: c.KeySym = 0xFF1B;
 const menu_bg: c_ulong = 0x2b2b2b;
 const menu_border: c_ulong = 0x505050;
+const menu_fg: c_ulong = 0xe6e6e6;
+const menu_hover: c_ulong = 0x3c3c3c;
+const menu_dim: c_ulong = 0x6a6a6a;
 
 var host: ?types.MenuHost = null;
 var menu_font: ?*c.XFontStruct = null;
 var menu_window: c.Window = 0;
 var menu_gc: c.GC = @ptrFromInt(0);
+
+const MenuState = struct {
+    menu: tray_menu.Menu,
+    submenu: ?tray_menu.Submenu = null,
+    hover: ?usize = null,
+};
 
 fn stateIndex(state: types.State) usize {
     return @intFromEnum(state);
@@ -316,16 +325,19 @@ fn openMenu(d: *c.Display) void {
 
     var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena_state.deinit();
-    const menu = tray_menu.rootMenu(arena_state.allocator(), current_state, menu_host.snapshot()) catch |err| {
-        std.log.scoped(.tray).debug("menu build failed: {s}", .{@errorName(err)});
-        return;
+    const arena = arena_state.allocator();
+    var menu_state = MenuState{
+        .menu = tray_menu.rootMenu(arena, current_state, menu_host.snapshot()) catch |err| {
+            std.log.scoped(.tray).debug("menu build failed: {s}", .{@errorName(err)});
+            return;
+        },
     };
 
     const screen = c.XDefaultScreen(d);
     const root = c.XRootWindow(d, screen);
     const advance: i32 = menu_font.?.max_bounds.width;
-    const w = tray_menu.width(menu, advance);
-    const h = tray_menu.height(menu);
+    const w = tray_menu.width(menu_state.menu, advance);
+    const h = tray_menu.height(menu_state.menu);
 
     var root_return: c.Window = 0;
     var child: c.Window = 0;
@@ -359,7 +371,7 @@ fn openMenu(d: *c.Display) void {
     }
     const keyboard_grabbed = c.XGrabKeyboard(d, menu_window, 0, c.GrabModeAsync, c.GrabModeAsync, c.CurrentTime) == c.GrabSuccess;
 
-    runMenuLoop(d);
+    runMenuLoop(d, &menu_state, arena);
 
     if (keyboard_grabbed) _ = c.XUngrabKeyboard(d, c.CurrentTime);
     _ = c.XUngrabPointer(d, c.CurrentTime);
@@ -377,14 +389,104 @@ fn closeMenuWindow(d: *c.Display) void {
     }
 }
 
-fn runMenuLoop(d: *c.Display) void {
+fn paint(d: *c.Display, menu_state: *MenuState) void {
+    const advance: i32 = menu_font.?.max_bounds.width;
+    const full_w = tray_menu.width(menu_state.menu, advance);
+    const full_h = tray_menu.height(menu_state.menu);
+    _ = c.XSetForeground(d, menu_gc, menu_bg);
+    _ = c.XFillRectangle(d, menu_window, menu_gc, 0, 0, @intCast(full_w), @intCast(full_h));
+
+    for (menu_state.menu.rows, 0..) |row, i| {
+        const y: i32 = @as(i32, @intCast(i)) * tray_menu.row_height;
+        switch (row) {
+            .separator => {
+                _ = c.XSetForeground(d, menu_gc, menu_border);
+                _ = c.XFillRectangle(d, menu_window, menu_gc, tray_menu.pad_x, y + @divTrunc(tray_menu.row_height, 2), @intCast(full_w - 2 * tray_menu.pad_x), 1);
+            },
+            .status => |text| {
+                _ = c.XSetForeground(d, menu_gc, menu_dim);
+                _ = c.XDrawString(d, menu_window, menu_gc, 2 * tray_menu.pad_x, y + 15, text.ptr, @intCast(text.len));
+            },
+            .item => |item| {
+                if (item.enabled and menu_state.hover == i) {
+                    _ = c.XSetForeground(d, menu_gc, menu_hover);
+                    _ = c.XFillRectangle(d, menu_window, menu_gc, 0, y, @intCast(full_w), tray_menu.row_height - 1);
+                }
+                if (item.checked) {
+                    _ = c.XSetForeground(d, menu_gc, menu_fg);
+                    _ = c.XFillRectangle(d, menu_window, menu_gc, tray_menu.pad_x, y + 8, 6, 6);
+                }
+                if (item.opens_submenu) {
+                    _ = c.XSetForeground(d, menu_gc, if (item.enabled) menu_fg else menu_dim);
+                    const right = full_w - tray_menu.pad_x;
+                    var tri = [_]c.XPoint{
+                        .{ .x = @intCast(right - 2 * advance), .y = @intCast(y + 8) },
+                        .{ .x = @intCast(right - advance), .y = @intCast(y + @divTrunc(tray_menu.row_height, 2)) },
+                        .{ .x = @intCast(right - 2 * advance), .y = @intCast(y + tray_menu.row_height - 8) },
+                    };
+                    _ = c.XFillPolygon(d, menu_window, menu_gc, &tri, @intCast(tri.len), c.Convex, c.CoordModeOrigin);
+                }
+                _ = c.XSetForeground(d, menu_gc, if (item.enabled) menu_fg else menu_dim);
+                const text_x = tray_menu.pad_x + 2 * advance;
+                _ = c.XDrawString(d, menu_window, menu_gc, text_x, y + 15, item.label.ptr, @intCast(item.label.len));
+            },
+        }
+    }
+    _ = c.XFlush(d);
+}
+
+fn openSubmenu(d: *c.Display, menu_state: *MenuState, arena: std.mem.Allocator, which: ?tray_menu.Submenu) void {
+    const menu_host = host orelse return;
+    const snapshot = menu_host.snapshot();
+    menu_state.menu = if (which) |sub|
+        tray_menu.submenu(arena, sub, snapshot, tray_menu.providerKeysFromEnv()) catch return
+    else
+        tray_menu.rootMenu(arena, current_state, snapshot) catch return;
+    menu_state.submenu = which;
+    menu_state.hover = null;
+    const advance: i32 = menu_font.?.max_bounds.width;
+    _ = c.XResizeWindow(d, menu_window, @intCast(tray_menu.width(menu_state.menu, advance)), @intCast(tray_menu.height(menu_state.menu)));
+    paint(d, menu_state);
+}
+
+fn runMenuLoop(d: *c.Display, menu_state: *MenuState, arena: std.mem.Allocator) void {
+    paint(d, menu_state);
     while (true) {
         var event: c.XEvent = undefined;
         _ = c.XNextEvent(d, &event);
         switch (event.type) {
-            c.Expose => _ = c.XClearWindow(d, menu_window),
-            c.ButtonPress => return,
-            c.KeyPress => if (c.XLookupKeysym(&event.xkey, 0) == xk_escape) return,
+            c.Expose => paint(d, menu_state),
+            c.MotionNotify => {
+                const row = tray_menu.rowAt(menu_state.menu, event.xmotion.y);
+                if (row != menu_state.hover) {
+                    menu_state.hover = row;
+                    paint(d, menu_state);
+                }
+            },
+            c.ButtonPress => {
+                const row = tray_menu.rowAt(menu_state.menu, event.xbutton.y) orelse return;
+                const item = switch (menu_state.menu.rows[row]) {
+                    .item => |it| it,
+                    else => return,
+                };
+                if (!item.enabled) continue;
+                switch (item.action) {
+                    .open_submenu => |sub| openSubmenu(d, menu_state, arena, sub),
+                    .back => openSubmenu(d, menu_state, arena, null),
+                    else => {
+                        if (host) |menu_host| menu_host.apply(item.action);
+                        return;
+                    },
+                }
+            },
+            c.KeyPress => {
+                if (c.XLookupKeysym(&event.xkey, 0) != xk_escape) continue;
+                if (menu_state.submenu != null) {
+                    openSubmenu(d, menu_state, arena, null);
+                } else {
+                    return;
+                }
+            },
             else => {},
         }
     }
