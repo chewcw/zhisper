@@ -1,4 +1,3 @@
-// src/tray_menu.zig
 const std = @import("std");
 const types = @import("tray_types.zig");
 const config = @import("config.zig");
