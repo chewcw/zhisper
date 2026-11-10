@@ -1,9 +1,11 @@
 const std = @import("std");
 const types = @import("tray_types.zig");
 const config = @import("config.zig");
+const hotkey_types = @import("hotkey_types.zig");
 
 pub const Submenu = types.Submenu;
 pub const Action = types.Action;
+pub const ProviderKeys = types.ProviderKeys;
 
 pub const Item = struct {
     label: []const u8,
@@ -72,6 +74,75 @@ pub fn rowAt(menu: Menu, y: i32) ?usize {
     const index: usize = @intCast(@divTrunc(y, row_height));
     if (index >= menu.rows.len) return null;
     return index;
+}
+
+fn choice(label: []const u8, action: Action, checked: bool, enabled: bool) Row {
+    return .{ .item = .{
+        .label = label,
+        .action = action,
+        .checked = checked,
+        .enabled = enabled,
+    } };
+}
+
+fn envSet(name: [*:0]const u8) bool {
+    const raw = std.c.getenv(name) orelse return false;
+    return raw[0] != 0;
+}
+
+/// The menu cannot ask for a key, and the environment is read once at daemon
+/// start, so a provider without a key here can never work this session.
+pub fn providerKeysFromEnv() ProviderKeys {
+    return .{
+        .groq = envSet("GROQ_API_KEY"),
+        .openai = envSet("OPENAI_API_KEY"),
+        .deepgram = envSet("DEEPGRAM_API_KEY"),
+    };
+}
+
+pub fn submenu(arena: std.mem.Allocator, which: Submenu, cfg: config.Config, keys: ProviderKeys) !Menu {
+    var rows: std.ArrayListUnmanaged(Row) = .empty;
+    try rows.append(arena, choice("< back", .back, false, true));
+    switch (which) {
+        .hotkey_mode => {
+            try rows.append(arena, choice("hold", .{ .set_hotkey_mode = .hold }, std.mem.eql(u8, cfg.hotkey.mode, "hold"), true));
+            try rows.append(arena, choice("toggle", .{ .set_hotkey_mode = .toggle }, std.mem.eql(u8, cfg.hotkey.mode, "toggle"), true));
+        },
+        .normalize => {
+            try rows.append(arena, choice("off", .{ .set_normalize_enabled = false }, !cfg.normalize.enabled, true));
+            try rows.append(arena, choice("on", .{ .set_normalize_enabled = true }, cfg.normalize.enabled, true));
+        },
+        .styling => {
+            for ([_][]const u8{ "casual", "semi-casual", "semi-formal", "formal" }) |value| {
+                try rows.append(arena, choice(value, .{ .set_styling = value }, std.mem.eql(u8, cfg.normalize.styling, value), true));
+            }
+        },
+        .structure => {
+            for ([_][]const u8{ "prose", "lists" }) |value| {
+                try rows.append(arena, choice(value, .{ .set_structure = value }, std.mem.eql(u8, cfg.normalize.structure, value), true));
+            }
+        },
+        .context => {
+            for ([_][]const u8{ "general", "email" }) |value| {
+                try rows.append(arena, choice(value, .{ .set_context = value }, std.mem.eql(u8, cfg.normalize.context, value), true));
+            }
+        },
+        .provider => {
+            const entries = [_]struct { name: []const u8, enabled: bool }{
+                .{ .name = "groq", .enabled = keys.groq },
+                .{ .name = "openai", .enabled = keys.openai },
+                .{ .name = "deepgram", .enabled = keys.deepgram },
+            };
+            for (entries) |entry| {
+                try rows.append(arena, choice(entry.name, .{ .set_provider = entry.name }, std.mem.eql(u8, cfg.transcribe.provider, entry.name), entry.enabled));
+            }
+        },
+        .overlay => {
+            try rows.append(arena, choice("on", .{ .set_overlay = true }, cfg.daemon.overlay, true));
+            try rows.append(arena, choice("off", .{ .set_overlay = false }, !cfg.daemon.overlay, true));
+        },
+    }
+    return .{ .rows = try rows.toOwnedSlice(arena) };
 }
 
 fn testMenu(arena: std.mem.Allocator, cfg: config.Config) !Menu {
@@ -162,4 +233,70 @@ test "root menu status follows the tray state" {
     defer arena_state.deinit();
     const menu = try rootMenu(arena_state.allocator(), .recording, config.defaultConfig());
     try std.testing.expectEqualStrings("zhisper: recording", statusAt(menu));
+}
+
+test "every submenu starts with a back row" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for ([_]Submenu{ .hotkey_mode, .normalize, .styling, .structure, .context, .provider, .overlay }) |which| {
+        const menu = try submenu(arena, which, config.defaultConfig(), .{});
+        const back = itemAt(menu, 0);
+        try std.testing.expectEqualStrings("< back", back.label);
+        try std.testing.expect(back.action == .back);
+    }
+}
+
+test "hotkey submenu marks the configured mode" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var cfg = config.defaultConfig();
+    cfg.hotkey.mode = "toggle";
+    const menu = try submenu(arena_state.allocator(), .hotkey_mode, cfg, .{});
+    try std.testing.expectEqual(@as(usize, 3), menu.rows.len);
+    try std.testing.expect(!itemAt(menu, 1).checked);
+    try std.testing.expect(itemAt(menu, 2).checked);
+    try std.testing.expectEqual(hotkey_types.Mode.toggle, itemAt(menu, 2).action.set_hotkey_mode);
+}
+
+test "provider submenu disables a provider without a key" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var cfg = config.defaultConfig();
+    cfg.transcribe.provider = "openai";
+    const menu = try submenu(arena_state.allocator(), .provider, cfg, .{ .groq = true, .openai = true });
+    try std.testing.expectEqual(@as(usize, 4), menu.rows.len);
+    try std.testing.expectEqualStrings("groq", itemAt(menu, 1).label);
+    try std.testing.expectEqualStrings("openai", itemAt(menu, 2).label);
+    try std.testing.expectEqualStrings("deepgram", itemAt(menu, 3).label);
+    try std.testing.expect(itemAt(menu, 1).enabled);
+    try std.testing.expect(itemAt(menu, 2).checked);
+    try std.testing.expect(!itemAt(menu, 3).enabled);
+}
+
+test "styling and structure submenus list their allowed values" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const styling = try submenu(arena, .styling, config.defaultConfig(), .{});
+    try std.testing.expectEqual(@as(usize, 5), styling.rows.len);
+    try std.testing.expectEqualStrings("semi-formal", itemAt(styling, 3).label);
+    try std.testing.expect(itemAt(styling, 3).checked);
+    const structure = try submenu(arena, .structure, config.defaultConfig(), .{});
+    try std.testing.expectEqualStrings("lists", itemAt(structure, 2).label);
+}
+
+test "normalize and overlay submenus carry booleans" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var cfg = config.defaultConfig();
+    cfg.daemon.overlay = false;
+    const overlay = try submenu(arena, .overlay, cfg, .{});
+    try std.testing.expect(itemAt(overlay, 1).action.set_overlay);
+    try std.testing.expect(!itemAt(overlay, 2).action.set_overlay);
+    try std.testing.expect(itemAt(overlay, 2).checked);
+    const normalize = try submenu(arena, .normalize, cfg, .{});
+    try std.testing.expect(!itemAt(normalize, 1).action.set_normalize_enabled);
+    try std.testing.expect(itemAt(normalize, 1).checked);
 }
