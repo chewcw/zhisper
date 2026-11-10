@@ -467,7 +467,7 @@ fn runMenuLoop(d: *c.Display, menu_state: *MenuState, arena: std.mem.Allocator) 
                 const row = tray_menu.rowAt(menu_state.menu, event.xbutton.y) orelse return;
                 const item = switch (menu_state.menu.rows[row]) {
                     .item => |it| it,
-                    else => return,
+                    else => continue,
                 };
                 if (!item.enabled) continue;
                 switch (item.action) {
