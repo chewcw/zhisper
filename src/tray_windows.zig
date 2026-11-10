@@ -39,7 +39,8 @@ fn stateCode(state: types.State) c_int {
     };
 }
 
-pub fn setup(_: std.Io) !void {
+/// The right-click menu exists on Linux only; this platform keeps an icon-only tray.
+pub fn setup(_: std.Io, _: types.MenuHost) !void {
     if (handle != null) return;
     handle = zhisper_tray_create(
         types.idle_png.ptr,

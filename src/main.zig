@@ -31,6 +31,19 @@ fn notifyLevelFromString(s: []const u8) !zhisper.notify.Level {
     return error.InvalidNotifyLevel;
 }
 
+/// Replaced by the real host when the menu actions land; until then the tray
+/// opens a menu whose selections are ignored.
+const PlaceholderMenuHost = struct {
+    cfg: zhisper.config.Config,
+
+    fn snapshotFn(ctx: *anyopaque) zhisper.config.Config {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        return self.cfg;
+    }
+
+    fn applyFn(_: *anyopaque, _: zhisper.tray.Action) void {}
+};
+
 /// 16kHz mono s16 = 32000 bytes/sec = 32 bytes/ms of payload (header excluded).
 fn minWavPayloadBytes(min_duration_ms: u32) usize {
     return @as(usize, min_duration_ms) * 32;
@@ -659,7 +672,13 @@ pub fn main(init: std.process.Init) !void {
 
     var tray_live = false;
     if (cfg.daemon.tray) {
-        if (zhisper.tray.setup(io)) |_| {
+        var placeholder_host = PlaceholderMenuHost{ .cfg = cfg };
+        const menu_host = zhisper.tray.MenuHost{
+            .ctx = &placeholder_host,
+            .snapshotFn = PlaceholderMenuHost.snapshotFn,
+            .applyFn = PlaceholderMenuHost.applyFn,
+        };
+        if (zhisper.tray.setup(io, menu_host)) |_| {
             tray_live = true;
         } else |err| {
             daemon_log.warn("tray setup failed (continuing without tray): {s}", .{@errorName(err)});
