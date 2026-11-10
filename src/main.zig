@@ -113,6 +113,21 @@ fn buildDeepgramConfig(gpa: std.mem.Allocator, unified: zhisper.config.Config, a
     };
 }
 
+/// Built per recording, from the process-lifetime arena: the session keeps
+/// these slices for as long as the stream lives.
+fn startDeepgramSession(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: zhisper.config.Config) ?*zhisper.deepgram.Session {
+    if (zhisper.transcribe.providerFromName(cfg.transcribe.provider) != .deepgram) return null;
+    const key = resolveApiKey(.deepgram) orelse return null;
+    const dc = buildDeepgramConfig(arena, cfg, key) catch |err| {
+        std.log.scoped(.daemon).debug("deepgram config failed: {s}", .{@errorName(err)});
+        return null;
+    };
+    return zhisper.deepgram.Session.start(io, gpa, dc) catch |err| {
+        std.log.scoped(.daemon).debug("stream start failed: {s}", .{@errorName(err)});
+        return null;
+    };
+}
+
 fn firstKey(values: []const ?[]const u8) ?[]const u8 {
     for (values) |v| {
         const s = v orelse continue;
@@ -316,11 +331,8 @@ fn workerMain(
     io: std.Io,
     gpa: std.mem.Allocator,
     session_gpa: std.mem.Allocator,
-    cfg: zhisper.config.Config,
-    api_key: []const u8,
-    deepgram_cfg: ?zhisper.deepgram.Config,
+    live: *zhisper.config_live.Live,
     q: *WorkQueue,
-    normalize_flag: *std.atomic.Value(bool),
     clipboard_state: zhisper.clipboard.Clipboard,
     trailing_newline: zhisper.inject.TrailingNewline,
     notify_queue: *zhisper.notify.NotifyQueue,
@@ -353,6 +365,25 @@ fn workerMain(
             q.mutex.unlock(io);
         }
         const wav_path = path_buf[0..len];
+        const cfg = live.get();
+        const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
+        const api_key = resolveApiKey(provider) orelse {
+            report(io, notify_queue, notify_level, .transcribe_failed, "missing API key");
+            if (session) |s| s.deinit(session_gpa);
+            continue;
+        };
+        // A batch request is synchronous, so its config can live in an arena
+        // that ends with the job.
+        var job_arena = std.heap.ArenaAllocator.init(gpa);
+        defer job_arena.deinit();
+        var deepgram_cfg: ?zhisper.deepgram.Config = null;
+        if (provider == .deepgram) {
+            deepgram_cfg = buildDeepgramConfig(job_arena.allocator(), cfg, api_key) catch |err| {
+                report(io, notify_queue, notify_level, .transcribe_failed, @errorName(err));
+                if (session) |s| s.deinit(session_gpa);
+                continue;
+            };
+        }
         const t_cfg = buildTranscribeConfig(cfg, api_key);
         const transcribe_log = std.log.scoped(.transcribe);
         // WHY two owners: a session transcript is freed by Session.deinit, while a
@@ -382,7 +413,7 @@ fn workerMain(
         // failure path keeps the raw transcript. An empty raw transcript is
         // skipped entirely so silence does not cost a network round trip.
         var final_text = text;
-        if (normalize_flag.load(.monotonic) and text.len > 0) {
+        if (cfg.normalize.enabled and text.len > 0) {
             const normalize_log = std.log.scoped(.normalize);
             if (resolveNormalizeKey()) |n_key| {
                 if (buildNormalizeConfig(cfg, n_key)) |n_cfg| {
@@ -616,20 +647,15 @@ pub fn main(init: std.process.Init) !void {
     const overlay_t0: std.Io.Clock.Timestamp = std.Io.Clock.Timestamp.now(io, .awake);
 
     const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
-    const api_key = resolveApiKey(provider) orelse {
+    if (resolveApiKey(provider) == null) {
         std.log.err("missing API key: set {s} (provider = {s})", .{
             zhisper.transcribe.keyEnvName(provider),
             cfg.transcribe.provider,
         });
         std.process.exit(1);
-    };
-    var d_cfg: ?zhisper.deepgram.Config = null;
-    if (provider == .deepgram) {
-        d_cfg = buildDeepgramConfig(arena, cfg, api_key) catch |err| {
-            std.log.err("deepgram config failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
     }
+    var live = try zhisper.config_live.Live.init(gpa, cfg);
+    defer live.deinit();
 
     var tray_live = false;
     if (cfg.daemon.tray) {
@@ -676,10 +702,7 @@ pub fn main(init: std.process.Init) !void {
     var notify_queue = zhisper.notify.NotifyQueue{};
 
     var queue = WorkQueue{};
-    // Seeded from the config file's value at startup; the poll loop below
-    // keeps it in sync.
-    var normalize_flag = std.atomic.Value(bool).init(cfg.normalize.enabled);
-    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, gpa, cfg, api_key, d_cfg, &queue, &normalize_flag, clipboard_state, trailing_newline, &notify_queue, notify_level });
+    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, gpa, &live, &queue, clipboard_state, trailing_newline, &notify_queue, notify_level });
 
     // WHY: the config is loaded once, but `normalize.enabled` is the escape
     // hatch a user reaches for the moment normalization mangles their text.
@@ -726,7 +749,9 @@ pub fn main(init: std.process.Init) !void {
                 // Uses init.gpa, not the arena: this runs repeatedly, and a
                 // typo in the config must not grow the arena or kill the daemon.
                 if (zhisper.config.loadNormalizeEnabled(gpa, io, cfg_path)) |enabled| {
-                    normalize_flag.store(enabled, .monotonic);
+                    live.setNormalizeEnabled(enabled) catch |err| {
+                        daemon_log.warn("normalize snapshot update failed: {s}", .{@errorName(err)});
+                    };
                     daemon_log.info("normalize.enabled = {}", .{enabled});
                 } else |err| {
                     daemon_log.warn("config reload failed, keeping normalize.enabled: {s}", .{@errorName(err)});
@@ -756,12 +781,7 @@ pub fn main(init: std.process.Init) !void {
                     daemon_log.info("start recording...", .{});
                     start_ts = std.Io.Clock.Timestamp.now(io, .awake);
                     have_start = true;
-                    if (d_cfg) |dc| {
-                        active_session = zhisper.deepgram.Session.start(io, gpa, dc) catch |err| blk: {
-                            daemon_log.debug("stream start failed: {s}", .{@errorName(err)});
-                            break :blk null;
-                        };
-                    }
+                    active_session = startDeepgramSession(io, gpa, arena, live.get());
                     zhisper.audio.setRecording(.start, "") catch |err| {
                         daemon_log.debug("record start failed: {s}", .{@errorName(err)});
                         if (active_session) |s| {
@@ -1237,4 +1257,18 @@ test "the errors level reports every failure but not the success" {
         const expected = kind != zhisper.notify.Kind.clipboard_ready;
         try std.testing.expectEqual(expected, zhisper.notify.shouldNotify(.errors, kind));
     }
+}
+
+test "a live provider change reaches the per-job transcribe config" {
+    const gpa = std.testing.allocator;
+    var live = try zhisper.config_live.Live.init(gpa, zhisper.config.defaultConfig());
+    defer live.deinit();
+    var next = live.get();
+    next.transcribe.provider = "openai";
+    try live.replace(next);
+
+    const t = buildTranscribeConfig(live.get(), "k");
+    try std.testing.expectEqualStrings("https://api.openai.com/v1/audio/transcriptions", t.base_url);
+    try std.testing.expectEqualStrings("whisper-1", t.model);
+    try std.testing.expectEqualStrings("k", t.api_key);
 }
