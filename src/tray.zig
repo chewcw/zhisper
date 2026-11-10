@@ -36,24 +36,28 @@ pub fn destroy(io: std.Io) void {
     return impl.destroy(io);
 }
 
+const Recorder = struct {
+    applied: ?Action = null,
+    fn snapshotFn(_: *anyopaque) config.Config {
+        return config.defaultConfig();
+    }
+    fn applyFn(ctx: *anyopaque, action: Action) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx));
+        self.applied = action;
+    }
+};
+
+fn recorderHost(rec: *Recorder) MenuHost {
+    return .{ .ctx = rec, .snapshotFn = Recorder.snapshotFn, .applyFn = Recorder.applyFn };
+}
+
 test "facade records state through the stub" {
     const stub = @import("tray_stub.zig");
     stub.reset();
     defer stub.reset();
 
-    const Recorder = struct {
-        applied: ?Action = null,
-        fn snapshotFn(_: *anyopaque) config.Config {
-            return config.defaultConfig();
-        }
-        fn applyFn(ctx: *anyopaque, action: Action) void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            self.applied = action;
-        }
-    };
-
     var recorder = Recorder{};
-    try setup(std.testing.io, .{ .ctx = &recorder, .snapshotFn = Recorder.snapshotFn, .applyFn = Recorder.applyFn });
+    try setup(std.testing.io, recorderHost(&recorder));
     try setState(std.testing.io, .working);
     poll(std.testing.io);
     try std.testing.expectEqual(State.working, stub.testLastState().?);
@@ -68,19 +72,8 @@ test "a picked action reaches the host through the facade" {
     stub.reset();
     defer stub.reset();
 
-    const Recorder = struct {
-        applied: ?Action = null,
-        fn snapshotFn(_: *anyopaque) config.Config {
-            return config.defaultConfig();
-        }
-        fn applyFn(ctx: *anyopaque, action: Action) void {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            self.applied = action;
-        }
-    };
-
     var recorder = Recorder{};
-    try setup(std.testing.io, .{ .ctx = &recorder, .snapshotFn = Recorder.snapshotFn, .applyFn = Recorder.applyFn });
+    try setup(std.testing.io, recorderHost(&recorder));
     try std.testing.expectEqualStrings("groq", stub.testHost().?.snapshot().transcribe.provider);
     stub.testPick(.quit);
     try std.testing.expect(recorder.applied.? == .quit);

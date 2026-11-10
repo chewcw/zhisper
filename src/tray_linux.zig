@@ -174,7 +174,6 @@ fn clientIsEmbedded() bool {
     return parent != root;
 }
 
-/// Accepts the menu host; popup and action handling are wired in later tasks.
 pub fn setup(io: std.Io, _: types.MenuHost) !void {
     if (display != null) return;
 

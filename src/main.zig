@@ -31,8 +31,7 @@ fn notifyLevelFromString(s: []const u8) !zhisper.notify.Level {
     return error.InvalidNotifyLevel;
 }
 
-/// Replaced by the real host when the menu actions land; until then the tray
-/// opens a menu whose selections are ignored.
+/// Host the tray uses while the apply path is still a no-op.
 const PlaceholderMenuHost = struct {
     cfg: zhisper.config.Config,
 
