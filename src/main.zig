@@ -31,18 +31,6 @@ fn notifyLevelFromString(s: []const u8) !zhisper.notify.Level {
     return error.InvalidNotifyLevel;
 }
 
-/// Host the tray uses while the apply path is still a no-op.
-const PlaceholderMenuHost = struct {
-    cfg: zhisper.config.Config,
-
-    fn snapshotFn(ctx: *anyopaque) zhisper.config.Config {
-        const self: *@This() = @ptrCast(@alignCast(ctx));
-        return self.cfg;
-    }
-
-    fn applyFn(_: *anyopaque, _: zhisper.tray.Action) void {}
-};
-
 /// 16kHz mono s16 = 32000 bytes/sec = 32 bytes/ms of payload (header excluded).
 fn minWavPayloadBytes(min_duration_ms: u32) usize {
     return @as(usize, min_duration_ms) * 32;
@@ -276,6 +264,100 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
             .cancel_pressed => unreachable, // handled above
         },
     }
+}
+
+/// Owns every overlay side effect so the menu toggle and the startup path
+/// cannot drift apart.
+const OverlayCtl = struct {
+    live: bool = false,
+    pos_path: ?[]const u8 = null,
+    displays: []zhisper.overlay_types.Display = &.{},
+    state: zhisper.overlay.State = .idle,
+
+    fn start(self: *OverlayCtl, io: std.Io, arena: std.mem.Allocator) void {
+        if (self.live) return;
+        zhisper.overlay.setup(.{}) catch |err| {
+            std.log.scoped(.daemon).debug("overlay setup failed (headless): {s}", .{@errorName(err)});
+            return;
+        };
+        zhisper.overlay.show() catch |err| {
+            std.log.scoped(.daemon).debug("overlay show failed: {s}", .{@errorName(err)});
+            zhisper.overlay.destroy();
+            return;
+        };
+        self.live = true;
+        self.pos_path = zhisper.overlay.overlayPosPath(arena) catch null;
+        self.displays = zhisper.overlay.displayList(arena) catch &.{};
+        if (self.pos_path) |pp| zhisper.overlay.move(zhisper.overlay.loadOverlayPos(io, arena, pp, self.displays));
+    }
+
+    fn stop(self: *OverlayCtl) void {
+        if (!self.live) return;
+        zhisper.overlay.destroy();
+        self.live = false;
+    }
+
+    fn set(self: *OverlayCtl, io: std.Io, arena: std.mem.Allocator, enabled: bool) void {
+        if (enabled) self.start(io, arena) else self.stop();
+    }
+};
+
+const MenuCtx = struct {
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cfg_path: []const u8,
+    live: ?*zhisper.config_live.Live = null,
+    loop_state: ?*LoopState = null,
+    overlay: ?*OverlayCtl = null,
+    cfg_signature: ?*?std.Io.File.Stat = null,
+    notify_level: zhisper.notify.Level = .off,
+    notify_live: bool = false,
+};
+
+fn menuSnapshot(ctx: *anyopaque) zhisper.config.Config {
+    const self: *MenuCtx = @ptrCast(@alignCast(ctx));
+    return self.live.?.get();
+}
+
+fn menuApply(ctx: *anyopaque, action: zhisper.tray.Action) void {
+    const self: *MenuCtx = @ptrCast(@alignCast(ctx));
+    applyMenuAction(self, action);
+}
+
+fn writeString(ctx: *MenuCtx, section: []const u8, key: []const u8, value: []const u8) bool {
+    zhisper.config_edit.setKey(ctx.io, ctx.gpa, ctx.cfg_path, section, key, .{ .string = value }) catch |err| {
+        reportConfigFailure(ctx, err);
+        return false;
+    };
+    return true;
+}
+
+fn writeBool(ctx: *MenuCtx, section: []const u8, key: []const u8, value: bool) bool {
+    zhisper.config_edit.setKey(ctx.io, ctx.gpa, ctx.cfg_path, section, key, .{ .boolean = value }) catch |err| {
+        reportConfigFailure(ctx, err);
+        return false;
+    };
+    return true;
+}
+
+fn reportConfigFailure(ctx: *MenuCtx, err: anyerror) void {
+    std.log.scoped(.daemon).warn("config write failed: {s}", .{@errorName(err)});
+    if (!ctx.notify_live) return;
+    const kind = zhisper.notify.Kind.config_write_failed;
+    if (!zhisper.notify.shouldNotify(ctx.notify_level, kind)) return;
+    zhisper.notify.show(ctx.io, zhisper.notify_types.forEvent(kind, @errorName(err))) catch |e| {
+        std.log.scoped(.daemon).debug("notification failed: {s}", .{@errorName(e)});
+    };
+}
+
+fn refreshSignature(ctx: *MenuCtx) void {
+    if (ctx.cfg_signature) |signature| signature.* = zhisper.config.fileSignature(ctx.io, ctx.cfg_path);
+}
+
+fn applyMenuAction(ctx: *MenuCtx, action: zhisper.tray.Action) void {
+    _ = ctx;
+    _ = action;
 }
 
 /// Overlay tint derivation (main thread only). Recording wins over a
@@ -621,39 +703,9 @@ pub fn main(init: std.process.Init) !void {
     // Overlay is best-effort: any failure degrades to hotkey-only. With
     // daemon.overlay = false the subsystem is never started, so there is
     // no SDL window, no display enumeration, and no overlay.pos read.
-    var overlay_live = false;
-    if (cfg.daemon.overlay) {
-        if (zhisper.overlay.setup(.{})) |_| {
-            overlay_live = true;
-        } else |err| {
-            daemon_log.debug("overlay setup failed (headless): {s}", .{@errorName(err)});
-        }
-    } else {
-        daemon_log.debug("overlay disabled by config", .{});
-    }
-    if (overlay_live) {
-        zhisper.overlay.show() catch |err| {
-            daemon_log.debug("overlay show failed: {s}", .{@errorName(err)});
-            zhisper.overlay.destroy();
-            overlay_live = false;
-        };
-    }
-    defer if (overlay_live) {
-        zhisper.overlay.destroy();
-    };
-    const overlay_pos_path = if (overlay_live) zhisper.overlay.overlayPosPath(arena) catch null else null;
-    // Enumerate once at startup (primary first); unplugged-monitor saves
-    // fall back to the default corner inside loadOverlayPos. The arena
-    // owns the list for the life of the daemon.
-    var overlay_no_displays: [0]zhisper.overlay_types.Display = .{};
-    var overlay_displays: []zhisper.overlay_types.Display = overlay_no_displays[0..];
-    if (overlay_live) {
-        overlay_displays = zhisper.overlay.displayList(arena) catch overlay_no_displays[0..];
-        if (overlay_pos_path) |pp| {
-            zhisper.overlay.move(zhisper.overlay.loadOverlayPos(io, arena, pp, overlay_displays));
-        }
-    }
-    var overlay_state: zhisper.overlay.State = .idle;
+    var ovl = OverlayCtl{};
+    if (cfg.daemon.overlay) ovl.start(io, arena) else daemon_log.debug("overlay disabled by config", .{});
+    defer ovl.stop();
     // Animation clock base: pill frames use millis since daemon start
     // (monotonic .awake clock, same source as the recording timer below).
     const overlay_t0: std.Io.Clock.Timestamp = std.Io.Clock.Timestamp.now(io, .awake);
@@ -670,13 +722,11 @@ pub fn main(init: std.process.Init) !void {
     defer live.deinit();
 
     var tray_live = false;
+    // These two callbacks run only from tray.poll inside the loop, by which
+    // time live, loop_state, ovl and cfg_signature are all bound.
+    var menu_ctx = MenuCtx{ .io = io, .gpa = gpa, .arena = arena, .cfg_path = cfg_path };
+    const menu_host = zhisper.tray.MenuHost{ .ctx = &menu_ctx, .snapshotFn = menuSnapshot, .applyFn = menuApply };
     if (cfg.daemon.tray) {
-        var placeholder_host = PlaceholderMenuHost{ .cfg = cfg };
-        const menu_host = zhisper.tray.MenuHost{
-            .ctx = &placeholder_host,
-            .snapshotFn = PlaceholderMenuHost.snapshotFn,
-            .applyFn = PlaceholderMenuHost.applyFn,
-        };
         if (zhisper.tray.setup(io, menu_host)) |_| {
             tray_live = true;
         } else |err| {
@@ -731,6 +781,12 @@ pub fn main(init: std.process.Init) !void {
     const cfg_poll_interval_ns: i96 = 1_000_000_000; // once a second
 
     var loop_state = LoopState{ .mode = mode };
+    menu_ctx.live = &live;
+    menu_ctx.loop_state = &loop_state;
+    menu_ctx.overlay = &ovl;
+    menu_ctx.cfg_signature = &cfg_signature;
+    menu_ctx.notify_level = notify_level;
+    menu_ctx.notify_live = notify_live;
     var start_ts: std.Io.Clock.Timestamp = undefined;
     var have_start = false;
     var active_session: ?*zhisper.deepgram.Session = null;
@@ -896,12 +952,12 @@ pub fn main(init: std.process.Init) !void {
                 },
             }
         } else {
-            if (overlay_live) {
+            if (ovl.live) {
                 if (zhisper.overlay.pollEvent()) |oev| {
                     switch (oev) {
                         .drag_start, .drag_moved => {},
                         .drag_end => |p| {
-                            if (overlay_pos_path) |pp| {
+                            if (ovl.pos_path) |pp| {
                                 zhisper.overlay.saveOverlayPos(io, pp, p) catch |err| {
                                     daemon_log.debug("overlay pos save failed: {s}", .{@errorName(err)});
                                 };
@@ -916,7 +972,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         // One-way state push on change only (never from the worker thread).
-        if (overlay_live) {
+        if (ovl.live) {
             // Pill animation frame (the backend throttles to 30fps and
             // guards clock jumps; negative deltas clamp to 0).
             const now_uptime = std.Io.Clock.Timestamp.now(io, .awake);
@@ -926,8 +982,8 @@ pub fn main(init: std.process.Init) !void {
             const pending = queue.has_pending;
             queue.mutex.unlock(io);
             const cur = overlayStateFor(loop_state.recording, pending);
-            if (cur != overlay_state) {
-                overlay_state = cur;
+            if (cur != ovl.state) {
+                ovl.state = cur;
                 zhisper.overlay.setState(cur);
             }
         }

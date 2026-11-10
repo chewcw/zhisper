@@ -16,6 +16,7 @@ pub const Kind = enum {
     clipboard_failed,
     clipboard_ready,
     search_failed,
+    config_write_failed,
 };
 
 /// The four accepted `[daemon] notify` strings. `config.zig` validates
@@ -163,6 +164,11 @@ fn textFor(kind: Kind, detail: []const u8) TextBuf {
         .empty_transcript => buf.appendSlice("No speech recognized — clipboard left untouched"),
         .clipboard_failed => buf.appendSlice("Transcribed, but the clipboard write failed"),
         .search_failed => buf.appendSlice("Search launch failed"),
+        .config_write_failed => {
+            buf.appendSlice("Could not save config (");
+            buf.appendSlice(detail);
+            buf.appendSlice(")");
+        },
         .clipboard_ready => {
             // The prefix is the whole point: without it a finished dictation
             // and a stray line of text look identical on screen.
@@ -283,6 +289,13 @@ test "forEvent is a pure function of its arguments" {
     try std.testing.expectEqualSlices(u8, first.text.slice(), second.text.slice());
     try std.testing.expectEqual(first.kind, second.kind);
     try std.testing.expectEqual(first.critical, second.critical);
+}
+
+test "config_write_failed is an error-level message that names the cause" {
+    try std.testing.expect(shouldNotify(.errors, .config_write_failed));
+    try std.testing.expect(!shouldNotify(.off, .config_write_failed));
+    const msg = forEvent(.config_write_failed, "AccessDenied");
+    try std.testing.expect(std.mem.indexOf(u8, msg.text.slice(), "AccessDenied") != null);
 }
 
 test "the config level strings are spelled out" {
