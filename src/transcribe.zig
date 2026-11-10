@@ -291,7 +291,6 @@ test "presetFor(.deepgram) returns the deepgram preset" {
     try std.testing.expectEqualStrings("nova-3", deepgram.model);
 }
 
-// src/transcribe.zig
 test "keyEnvName returns one variable per provider" {
     try std.testing.expectEqualStrings("GROQ_API_KEY", keyEnvName(.groq));
     try std.testing.expectEqualStrings("OPENAI_API_KEY", keyEnvName(.openai));
