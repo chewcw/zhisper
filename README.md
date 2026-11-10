@@ -72,11 +72,15 @@ zig build -Dtarget=aarch64-macos
 | `groq` (default) | `GROQ_API_KEY` | `whisper-large-v3-turbo` | `https://api.groq.com/openai/v1/audio/transcriptions` |
 | `openai` | `OPENAI_API_KEY` | `whisper-1` | `https://api.openai.com/v1/audio/transcriptions` |
 | `deepgram` | `DEEPGRAM_API_KEY` | `nova-3` | `https://api.deepgram.com/v1/listen` |
-| `custom` | `ZHISPER_API_KEY` | *you choose* | *you choose* (`base_url` required) |
+| `custom` | `CUSTOM_API_KEY` | *you choose* | *you choose* (`base_url` required) |
 
 With the Deepgram provider, audio is sent over a WebSocket while the recording runs (on Linux and macOS); the transcript is typed once after the hotkey is released. If the stream fails, zhisper falls back to the Deepgram batch endpoint. On Windows the Deepgram path posts the saved WAV to the batch endpoint instead of streaming, because the streaming transport cannot interrupt a blocked read without freeing memory the reader still uses.
 
 Keys are **environment variables only**. Putting `api_key` in the config file is a hard startup error, by design.
+
+Each provider reads only its own variable, so you can export several keys at
+once and switch provider without touching the environment. The old shared
+variable `ZHISPER_API_KEY` is no longer read.
 
 ```sh
 export GROQ_API_KEY="gsk_..."
@@ -230,9 +234,8 @@ Copy the number as-is: the config takes the native value, so a Linux `KEY_*` con
 
 | Variable | Purpose |
 |---|---|
-| `ZHISPER_API_KEY` | API key, wins over the provider-specific variables |
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | Key for the matching provider |
-| `DEEPGRAM_API_KEY` | API key for the Deepgram provider |
+| `DEEPGRAM_API_KEY` / `CUSTOM_API_KEY` | Key for the Deepgram and custom providers |
 | `ZHISPER_LANGUAGE` | Language tag for Deepgram (empty = auto) |
 | `ZHISPER_KEYTERM` | Comma-separated terms for Deepgram to boost |
 | `ZHISPER_DEBUG` / `ZHISPER_VERBOSE` | Enable debug logging on stdout (errors always log to stderr) |
@@ -250,7 +253,7 @@ structure = "prose"      # prose | lists
 context = "general"      # general | email
 ```
 
-- The normalizer resolves its own API key in this order: `ZHISPER_API_KEY`, then `GROQ_API_KEY`, then `OPENAI_API_KEY`. It never reads or falls back to `DEEPGRAM_API_KEY`.
+- The normalizer resolves its own API key in this order: `GROQ_API_KEY`, then `OPENAI_API_KEY`. It never reads or falls back to `DEEPGRAM_API_KEY` or `CUSTOM_API_KEY`.
 - This section is **watched at runtime**: flip `enabled` and it takes effect within a second, no restart.
 - `base_url` can point at any OpenAI-compatible chat-completions endpoint, so the normalizer can run locally or on a different provider without recompiling.
 - The three axes are closed sets; a value outside them is rejected at startup because the prompt format was only trained on these combinations.

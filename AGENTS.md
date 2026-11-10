@@ -16,7 +16,7 @@ zig build -Dtarget=x86_64-windows   # cross-compile check (also try x86_64-macos
 
 - Deps come from `build.zig.zon` hashes (`toml`, `argz`, `sdl3`). Fetch with `zig fetch --save <url>`; never hand-edit hashes.
 - `zig-pkg/`, `.zig-cache/`, `zig-out/` are gitignored build artifacts. Never commit them.
-- Config: copy `config.example.toml` to OS config dir (see `resolveConfigPath` in `src/main.zig`); secrets are **env-only** (`ZHISPER_API_KEY` / `GROQ_API_KEY` / `OPENAI_API_KEY`). `api_key` in TOML is a hard `error.ApiKeyInFile`.
+- Config: copy `config.example.toml` to OS config dir (see `resolveConfigPath` in `src/main.zig`); secrets are **env-only** and each provider reads only its own variable (`GROQ_API_KEY` / `OPENAI_API_KEY` / `DEEPGRAM_API_KEY` / `CUSTOM_API_KEY`). `api_key` in TOML is a hard `error.ApiKeyInFile`.
 - Debug logs: `ZHISPER_DEBUG=1` / `ZHISPER_VERBOSE=1` or `--verbose` / `verbose = true`. `test.sh` is a local-only manual run helper, not CI.
 
 ## Core rules (user-mandated, non-negotiable)
