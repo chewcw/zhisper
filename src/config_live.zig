@@ -1,22 +1,8 @@
 const std = @import("std");
 const config = @import("config.zig");
 
-const Mutex = struct {
-    state: std.atomic.Value(u32) = .init(0),
-
-    fn lock(self: *Mutex) void {
-        while (self.state.swap(1, .acquire) != 0) {
-            std.atomic.spinLoopHint();
-        }
-    }
-
-    fn unlock(self: *Mutex) void {
-        self.state.store(0, .release);
-    }
-};
-
 pub const Live = struct {
-    mutex: Mutex = .{},
+    mutex: std.atomic.Mutex = .unlocked,
     arena: std.heap.ArenaAllocator,
     current: *const config.Config,
 
@@ -33,7 +19,7 @@ pub const Live = struct {
     }
 
     pub fn get(self: *Live) config.Config {
-        self.mutex.lock();
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
         return self.current.*;
     }
@@ -44,7 +30,7 @@ pub const Live = struct {
         // Allocate outside the lock so a slow allocator does not block readers.
         const copy = try self.arena.allocator().create(config.Config);
         copy.* = try config.dupeConfig(self.arena.allocator(), cfg);
-        self.mutex.lock();
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
         self.current = copy;
     }
