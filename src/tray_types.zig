@@ -1,4 +1,6 @@
 const std = @import("std");
+const config = @import("config.zig");
+const hotkey_types = @import("hotkey_types.zig");
 
 /// Single vocabulary for the tray indicator. Pure Zig so every target,
 /// including test builds, can use it without OS headers.
@@ -39,4 +41,64 @@ test "embedded tray assets are 22x22 PNGs" {
         try std.testing.expectEqual(@as(u32, 22), pngDimension(png, 16));
         try std.testing.expectEqual(@as(u32, 22), pngDimension(png, 20));
     }
+}
+
+pub const Submenu = enum { hotkey_mode, normalize, styling, structure, context, provider, overlay };
+
+pub const Action = union(enum) {
+    set_hotkey_mode: hotkey_types.Mode,
+    set_normalize_enabled: bool,
+    set_styling: []const u8,
+    set_structure: []const u8,
+    set_context: []const u8,
+    set_provider: []const u8,
+    set_overlay: bool,
+    open_submenu: Submenu,
+    back,
+    quit,
+};
+
+/// Which provider API keys the daemon environment carries. The menu greys out
+/// a provider without a key, because selecting it would fail at transcription
+/// time instead of at click time.
+pub const ProviderKeys = struct { groq: bool = false, openai: bool = false, deepgram: bool = false };
+
+/// Lets the Linux tray ask the daemon for the current config and report a
+/// selection without importing main.zig.
+pub const MenuHost = struct {
+    ctx: *anyopaque,
+    snapshotFn: *const fn (ctx: *anyopaque) config.Config,
+    applyFn: *const fn (ctx: *anyopaque, action: Action) void,
+
+    pub fn snapshot(self: MenuHost) config.Config {
+        return self.snapshotFn(self.ctx);
+    }
+
+    pub fn apply(self: MenuHost, action: Action) void {
+        self.applyFn(self.ctx, action);
+    }
+};
+
+test "MenuHost forwards snapshot and apply to its context" {
+    const Fake = struct {
+        applied: ?Action = null,
+        cfg: config.Config,
+
+        fn snapshotFn(ctx: *anyopaque) config.Config {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            return self.cfg;
+        }
+
+        fn applyFn(ctx: *anyopaque, action: Action) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.applied = action;
+        }
+    };
+
+    var fake = Fake{ .cfg = config.defaultConfig() };
+    const host = MenuHost{ .ctx = &fake, .snapshotFn = Fake.snapshotFn, .applyFn = Fake.applyFn };
+
+    try std.testing.expectEqualStrings("groq", host.snapshot().transcribe.provider);
+    host.apply(.quit);
+    try std.testing.expect(fake.applied.? == .quit);
 }
