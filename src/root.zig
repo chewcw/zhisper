@@ -18,6 +18,7 @@ pub const tray_types = @import("tray_types.zig");
 pub const notify = @import("notify.zig");
 pub const notify_types = @import("notify_types.zig");
 pub const config = @import("config.zig");
+pub const config_live = @import("config_live.zig");
 pub const config_edit = @import("config_edit.zig");
 pub const log = @import("log.zig");
 pub const clipboard = @import("clipboard.zig");
@@ -46,6 +47,7 @@ test {
     std.testing.refAllDecls(@import("notify_types.zig"));
     std.testing.refAllDecls(@import("notify_stub.zig"));
     std.testing.refAllDecls(@import("config.zig"));
+    std.testing.refAllDecls(@import("config_live.zig"));
     std.testing.refAllDecls(@import("config_edit.zig"));
     std.testing.refAllDecls(@import("log.zig"));
     std.testing.refAllDecls(@import("clipboard.zig"));
