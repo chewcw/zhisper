@@ -356,8 +356,63 @@ fn refreshSignature(ctx: *MenuCtx) void {
 }
 
 fn applyMenuAction(ctx: *MenuCtx, action: zhisper.tray.Action) void {
-    _ = ctx;
-    _ = action;
+    const live = ctx.live orelse return;
+    switch (action) {
+        // Quit is not a setting: no file write is involved.
+        .quit => {
+            stop_requested.store(true, .monotonic);
+            return;
+        },
+        .open_submenu, .back => return,
+        .set_hotkey_mode => |mode| {
+            const name = @tagName(mode);
+            if (!writeString(ctx, "hotkey", "mode", name)) return;
+            var next = live.get();
+            next.hotkey.mode = name;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+            if (ctx.loop_state) |ls| ls.mode = mode;
+        },
+        .set_normalize_enabled => |enabled| {
+            if (!writeBool(ctx, "normalize", "enabled", enabled)) return;
+            live.setNormalizeEnabled(enabled) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_styling => |value| {
+            if (!writeString(ctx, "normalize", "styling", value)) return;
+            var next = live.get();
+            next.normalize.styling = value;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_structure => |value| {
+            if (!writeString(ctx, "normalize", "structure", value)) return;
+            var next = live.get();
+            next.normalize.structure = value;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_context => |value| {
+            if (!writeString(ctx, "normalize", "context", value)) return;
+            var next = live.get();
+            next.normalize.context = value;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_provider => |name| {
+            if (!writeString(ctx, "transcribe", "provider", name)) return;
+            if (!writeString(ctx, "transcribe", "model", "")) return;
+            if (!writeString(ctx, "transcribe", "base_url", "")) return;
+            var next = live.get();
+            next.transcribe.provider = name;
+            next.transcribe.model = "";
+            next.transcribe.base_url = "";
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_overlay => |enabled| {
+            if (!writeBool(ctx, "daemon", "overlay", enabled)) return;
+            var next = live.get();
+            next.daemon.overlay = enabled;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+            if (ctx.overlay) |ovl| ovl.set(ctx.io, ctx.arena, enabled);
+        },
+    }
+    refreshSignature(ctx);
 }
 
 /// Overlay tint derivation (main thread only). Recording wins over a
