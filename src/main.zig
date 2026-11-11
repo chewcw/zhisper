@@ -113,6 +113,21 @@ fn buildDeepgramConfig(gpa: std.mem.Allocator, unified: zhisper.config.Config, a
     };
 }
 
+/// Built per recording, from the process-lifetime arena: the session keeps
+/// these slices for as long as the stream lives.
+fn startDeepgramSession(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, cfg: zhisper.config.Config) ?*zhisper.deepgram.Session {
+    if (zhisper.transcribe.providerFromName(cfg.transcribe.provider) != .deepgram) return null;
+    const key = resolveApiKey(.deepgram) orelse return null;
+    const dc = buildDeepgramConfig(arena, cfg, key) catch |err| {
+        std.log.scoped(.daemon).debug("deepgram config failed: {s}", .{@errorName(err)});
+        return null;
+    };
+    return zhisper.deepgram.Session.start(io, gpa, dc) catch |err| {
+        std.log.scoped(.daemon).debug("stream start failed: {s}", .{@errorName(err)});
+        return null;
+    };
+}
+
 fn firstKey(values: []const ?[]const u8) ?[]const u8 {
     for (values) |v| {
         const s = v orelse continue;
@@ -251,6 +266,155 @@ fn handleHotkeyEvent(s: *LoopState, ev: zhisper.hotkey.KeyEvent) Action {
     }
 }
 
+/// Owns every overlay side effect so the menu toggle and the startup path
+/// cannot drift apart.
+const OverlayCtl = struct {
+    live: bool = false,
+    pos_path: ?[]const u8 = null,
+    displays: []zhisper.overlay_types.Display = &.{},
+    state: zhisper.overlay.State = .idle,
+
+    fn start(self: *OverlayCtl, io: std.Io, arena: std.mem.Allocator) void {
+        if (self.live) return;
+        zhisper.overlay.setup(.{}) catch |err| {
+            std.log.scoped(.daemon).debug("overlay setup failed (headless): {s}", .{@errorName(err)});
+            return;
+        };
+        zhisper.overlay.show() catch |err| {
+            std.log.scoped(.daemon).debug("overlay show failed: {s}", .{@errorName(err)});
+            zhisper.overlay.destroy();
+            return;
+        };
+        self.live = true;
+        self.pos_path = zhisper.overlay.overlayPosPath(arena) catch null;
+        self.displays = zhisper.overlay.displayList(arena) catch &.{};
+        if (self.pos_path) |pp| zhisper.overlay.move(zhisper.overlay.loadOverlayPos(io, arena, pp, self.displays));
+    }
+
+    fn stop(self: *OverlayCtl) void {
+        if (!self.live) return;
+        zhisper.overlay.destroy();
+        self.live = false;
+    }
+
+    fn set(self: *OverlayCtl, io: std.Io, arena: std.mem.Allocator, enabled: bool) void {
+        if (enabled) self.start(io, arena) else self.stop();
+    }
+};
+
+const MenuCtx = struct {
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cfg_path: []const u8,
+    live: ?*zhisper.config_live.Live = null,
+    loop_state: ?*LoopState = null,
+    overlay: ?*OverlayCtl = null,
+    cfg_signature: ?*?std.Io.File.Stat = null,
+    notify_level: zhisper.notify.Level = .off,
+    notify_live: bool = false,
+};
+
+fn menuSnapshot(ctx: *anyopaque) zhisper.config.Config {
+    const self: *MenuCtx = @ptrCast(@alignCast(ctx));
+    return self.live.?.get();
+}
+
+fn menuApply(ctx: *anyopaque, action: zhisper.tray.Action) void {
+    const self: *MenuCtx = @ptrCast(@alignCast(ctx));
+    applyMenuAction(self, action);
+}
+
+fn writeString(ctx: *MenuCtx, section: []const u8, key: []const u8, value: []const u8) bool {
+    zhisper.config_edit.setKey(ctx.io, ctx.gpa, ctx.cfg_path, section, key, .{ .string = value }) catch |err| {
+        reportConfigFailure(ctx, err);
+        return false;
+    };
+    return true;
+}
+
+fn writeBool(ctx: *MenuCtx, section: []const u8, key: []const u8, value: bool) bool {
+    zhisper.config_edit.setKey(ctx.io, ctx.gpa, ctx.cfg_path, section, key, .{ .boolean = value }) catch |err| {
+        reportConfigFailure(ctx, err);
+        return false;
+    };
+    return true;
+}
+
+fn reportConfigFailure(ctx: *MenuCtx, err: anyerror) void {
+    std.log.scoped(.daemon).warn("config write failed: {s}", .{@errorName(err)});
+    if (!ctx.notify_live) return;
+    const kind = zhisper.notify.Kind.config_write_failed;
+    if (!zhisper.notify.shouldNotify(ctx.notify_level, kind)) return;
+    zhisper.notify.show(ctx.io, zhisper.notify_types.forEvent(kind, @errorName(err))) catch |e| {
+        std.log.scoped(.daemon).debug("notification failed: {s}", .{@errorName(e)});
+    };
+}
+
+fn refreshSignature(ctx: *MenuCtx) void {
+    if (ctx.cfg_signature) |signature| signature.* = zhisper.config.fileSignature(ctx.io, ctx.cfg_path);
+}
+
+fn applyMenuAction(ctx: *MenuCtx, action: zhisper.tray.Action) void {
+    const live = ctx.live orelse return;
+    switch (action) {
+        // Quit is not a setting: no file write is involved.
+        .quit => {
+            stop_requested.store(true, .monotonic);
+            return;
+        },
+        .open_submenu, .back => return,
+        .set_hotkey_mode => |mode| {
+            const name = @tagName(mode);
+            if (!writeString(ctx, "hotkey", "mode", name)) return;
+            var next = live.get();
+            next.hotkey.mode = name;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+            if (ctx.loop_state) |ls| ls.mode = mode;
+        },
+        .set_normalize_enabled => |enabled| {
+            if (!writeBool(ctx, "normalize", "enabled", enabled)) return;
+            live.setNormalizeEnabled(enabled) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_styling => |value| {
+            if (!writeString(ctx, "normalize", "styling", value)) return;
+            var next = live.get();
+            next.normalize.styling = value;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_structure => |value| {
+            if (!writeString(ctx, "normalize", "structure", value)) return;
+            var next = live.get();
+            next.normalize.structure = value;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_context => |value| {
+            if (!writeString(ctx, "normalize", "context", value)) return;
+            var next = live.get();
+            next.normalize.context = value;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_provider => |name| {
+            if (!writeString(ctx, "transcribe", "provider", name)) return;
+            if (!writeString(ctx, "transcribe", "model", "")) return;
+            if (!writeString(ctx, "transcribe", "base_url", "")) return;
+            var next = live.get();
+            next.transcribe.provider = name;
+            next.transcribe.model = "";
+            next.transcribe.base_url = "";
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+        },
+        .set_overlay => |enabled| {
+            if (!writeBool(ctx, "daemon", "overlay", enabled)) return;
+            var next = live.get();
+            next.daemon.overlay = enabled;
+            live.replace(next) catch |err| return reportConfigFailure(ctx, err);
+            if (ctx.overlay) |ovl| ovl.set(ctx.io, ctx.arena, enabled);
+        },
+    }
+    refreshSignature(ctx);
+}
+
 /// Overlay tint derivation (main thread only). Recording wins over a
 /// queued clip; the worker thread never touches the overlay.
 fn overlayStateFor(recording: bool, has_pending: bool) zhisper.overlay.State {
@@ -316,11 +480,8 @@ fn workerMain(
     io: std.Io,
     gpa: std.mem.Allocator,
     session_gpa: std.mem.Allocator,
-    cfg: zhisper.config.Config,
-    api_key: []const u8,
-    deepgram_cfg: ?zhisper.deepgram.Config,
+    live: *zhisper.config_live.Live,
     q: *WorkQueue,
-    normalize_flag: *std.atomic.Value(bool),
     clipboard_state: zhisper.clipboard.Clipboard,
     trailing_newline: zhisper.inject.TrailingNewline,
     notify_queue: *zhisper.notify.NotifyQueue,
@@ -353,6 +514,25 @@ fn workerMain(
             q.mutex.unlock(io);
         }
         const wav_path = path_buf[0..len];
+        const cfg = live.get();
+        const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
+        const api_key = resolveApiKey(provider) orelse {
+            report(io, notify_queue, notify_level, .transcribe_failed, "missing API key");
+            if (session) |s| s.deinit(session_gpa);
+            continue;
+        };
+        // A batch request is synchronous, so its config can live in an arena
+        // that ends with the job.
+        var job_arena = std.heap.ArenaAllocator.init(gpa);
+        defer job_arena.deinit();
+        var deepgram_cfg: ?zhisper.deepgram.Config = null;
+        if (provider == .deepgram) {
+            deepgram_cfg = buildDeepgramConfig(job_arena.allocator(), cfg, api_key) catch |err| {
+                report(io, notify_queue, notify_level, .transcribe_failed, @errorName(err));
+                if (session) |s| s.deinit(session_gpa);
+                continue;
+            };
+        }
         const t_cfg = buildTranscribeConfig(cfg, api_key);
         const transcribe_log = std.log.scoped(.transcribe);
         // WHY two owners: a session transcript is freed by Session.deinit, while a
@@ -382,7 +562,7 @@ fn workerMain(
         // failure path keeps the raw transcript. An empty raw transcript is
         // skipped entirely so silence does not cost a network round trip.
         var final_text = text;
-        if (normalize_flag.load(.monotonic) and text.len > 0) {
+        if (cfg.normalize.enabled and text.len > 0) {
             const normalize_log = std.log.scoped(.normalize);
             if (resolveNormalizeKey()) |n_key| {
                 if (buildNormalizeConfig(cfg, n_key)) |n_cfg| {
@@ -578,62 +758,31 @@ pub fn main(init: std.process.Init) !void {
     // Overlay is best-effort: any failure degrades to hotkey-only. With
     // daemon.overlay = false the subsystem is never started, so there is
     // no SDL window, no display enumeration, and no overlay.pos read.
-    var overlay_live = false;
-    if (cfg.daemon.overlay) {
-        if (zhisper.overlay.setup(.{})) |_| {
-            overlay_live = true;
-        } else |err| {
-            daemon_log.debug("overlay setup failed (headless): {s}", .{@errorName(err)});
-        }
-    } else {
-        daemon_log.debug("overlay disabled by config", .{});
-    }
-    if (overlay_live) {
-        zhisper.overlay.show() catch |err| {
-            daemon_log.debug("overlay show failed: {s}", .{@errorName(err)});
-            zhisper.overlay.destroy();
-            overlay_live = false;
-        };
-    }
-    defer if (overlay_live) {
-        zhisper.overlay.destroy();
-    };
-    const overlay_pos_path = if (overlay_live) zhisper.overlay.overlayPosPath(arena) catch null else null;
-    // Enumerate once at startup (primary first); unplugged-monitor saves
-    // fall back to the default corner inside loadOverlayPos. The arena
-    // owns the list for the life of the daemon.
-    var overlay_no_displays: [0]zhisper.overlay_types.Display = .{};
-    var overlay_displays: []zhisper.overlay_types.Display = overlay_no_displays[0..];
-    if (overlay_live) {
-        overlay_displays = zhisper.overlay.displayList(arena) catch overlay_no_displays[0..];
-        if (overlay_pos_path) |pp| {
-            zhisper.overlay.move(zhisper.overlay.loadOverlayPos(io, arena, pp, overlay_displays));
-        }
-    }
-    var overlay_state: zhisper.overlay.State = .idle;
+    var ovl = OverlayCtl{};
+    if (cfg.daemon.overlay) ovl.start(io, arena) else daemon_log.debug("overlay disabled by config", .{});
+    defer ovl.stop();
     // Animation clock base: pill frames use millis since daemon start
     // (monotonic .awake clock, same source as the recording timer below).
     const overlay_t0: std.Io.Clock.Timestamp = std.Io.Clock.Timestamp.now(io, .awake);
 
     const provider = zhisper.transcribe.providerFromName(cfg.transcribe.provider);
-    const api_key = resolveApiKey(provider) orelse {
+    if (resolveApiKey(provider) == null) {
         std.log.err("missing API key: set {s} (provider = {s})", .{
             zhisper.transcribe.keyEnvName(provider),
             cfg.transcribe.provider,
         });
         std.process.exit(1);
-    };
-    var d_cfg: ?zhisper.deepgram.Config = null;
-    if (provider == .deepgram) {
-        d_cfg = buildDeepgramConfig(arena, cfg, api_key) catch |err| {
-            std.log.err("deepgram config failed: {s}", .{@errorName(err)});
-            std.process.exit(1);
-        };
     }
+    var live = try zhisper.config_live.Live.init(gpa, cfg);
+    defer live.deinit();
 
     var tray_live = false;
+    // These two callbacks run only from tray.poll inside the loop, by which
+    // time live, loop_state, ovl and cfg_signature are all bound.
+    var menu_ctx = MenuCtx{ .io = io, .gpa = gpa, .arena = arena, .cfg_path = cfg_path };
+    const menu_host = zhisper.tray.MenuHost{ .ctx = &menu_ctx, .snapshotFn = menuSnapshot, .applyFn = menuApply };
     if (cfg.daemon.tray) {
-        if (zhisper.tray.setup(io)) |_| {
+        if (zhisper.tray.setup(io, menu_host)) |_| {
             tray_live = true;
         } else |err| {
             daemon_log.warn("tray setup failed (continuing without tray): {s}", .{@errorName(err)});
@@ -676,10 +825,7 @@ pub fn main(init: std.process.Init) !void {
     var notify_queue = zhisper.notify.NotifyQueue{};
 
     var queue = WorkQueue{};
-    // Seeded from the config file's value at startup; the poll loop below
-    // keeps it in sync.
-    var normalize_flag = std.atomic.Value(bool).init(cfg.normalize.enabled);
-    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, gpa, cfg, api_key, d_cfg, &queue, &normalize_flag, clipboard_state, trailing_newline, &notify_queue, notify_level });
+    const worker = try std.Thread.spawn(.{}, workerMain, .{ io, arena, gpa, &live, &queue, clipboard_state, trailing_newline, &notify_queue, notify_level });
 
     // WHY: the config is loaded once, but `normalize.enabled` is the escape
     // hatch a user reaches for the moment normalization mangles their text.
@@ -690,6 +836,12 @@ pub fn main(init: std.process.Init) !void {
     const cfg_poll_interval_ns: i96 = 1_000_000_000; // once a second
 
     var loop_state = LoopState{ .mode = mode };
+    menu_ctx.live = &live;
+    menu_ctx.loop_state = &loop_state;
+    menu_ctx.overlay = &ovl;
+    menu_ctx.cfg_signature = &cfg_signature;
+    menu_ctx.notify_level = notify_level;
+    menu_ctx.notify_live = notify_live;
     var start_ts: std.Io.Clock.Timestamp = undefined;
     var have_start = false;
     var active_session: ?*zhisper.deepgram.Session = null;
@@ -726,7 +878,9 @@ pub fn main(init: std.process.Init) !void {
                 // Uses init.gpa, not the arena: this runs repeatedly, and a
                 // typo in the config must not grow the arena or kill the daemon.
                 if (zhisper.config.loadNormalizeEnabled(gpa, io, cfg_path)) |enabled| {
-                    normalize_flag.store(enabled, .monotonic);
+                    live.setNormalizeEnabled(enabled) catch |err| {
+                        daemon_log.warn("normalize snapshot update failed: {s}", .{@errorName(err)});
+                    };
                     daemon_log.info("normalize.enabled = {}", .{enabled});
                 } else |err| {
                     daemon_log.warn("config reload failed, keeping normalize.enabled: {s}", .{@errorName(err)});
@@ -756,12 +910,7 @@ pub fn main(init: std.process.Init) !void {
                     daemon_log.info("start recording...", .{});
                     start_ts = std.Io.Clock.Timestamp.now(io, .awake);
                     have_start = true;
-                    if (d_cfg) |dc| {
-                        active_session = zhisper.deepgram.Session.start(io, gpa, dc) catch |err| blk: {
-                            daemon_log.debug("stream start failed: {s}", .{@errorName(err)});
-                            break :blk null;
-                        };
-                    }
+                    active_session = startDeepgramSession(io, gpa, arena, live.get());
                     zhisper.audio.setRecording(.start, "") catch |err| {
                         daemon_log.debug("record start failed: {s}", .{@errorName(err)});
                         if (active_session) |s| {
@@ -858,12 +1007,12 @@ pub fn main(init: std.process.Init) !void {
                 },
             }
         } else {
-            if (overlay_live) {
+            if (ovl.live) {
                 if (zhisper.overlay.pollEvent()) |oev| {
                     switch (oev) {
                         .drag_start, .drag_moved => {},
                         .drag_end => |p| {
-                            if (overlay_pos_path) |pp| {
+                            if (ovl.pos_path) |pp| {
                                 zhisper.overlay.saveOverlayPos(io, pp, p) catch |err| {
                                     daemon_log.debug("overlay pos save failed: {s}", .{@errorName(err)});
                                 };
@@ -878,7 +1027,7 @@ pub fn main(init: std.process.Init) !void {
             }
         }
         // One-way state push on change only (never from the worker thread).
-        if (overlay_live) {
+        if (ovl.live) {
             // Pill animation frame (the backend throttles to 30fps and
             // guards clock jumps; negative deltas clamp to 0).
             const now_uptime = std.Io.Clock.Timestamp.now(io, .awake);
@@ -888,8 +1037,8 @@ pub fn main(init: std.process.Init) !void {
             const pending = queue.has_pending;
             queue.mutex.unlock(io);
             const cur = overlayStateFor(loop_state.recording, pending);
-            if (cur != overlay_state) {
-                overlay_state = cur;
+            if (cur != ovl.state) {
+                ovl.state = cur;
                 zhisper.overlay.setState(cur);
             }
         }
@@ -1237,4 +1386,18 @@ test "the errors level reports every failure but not the success" {
         const expected = kind != zhisper.notify.Kind.clipboard_ready;
         try std.testing.expectEqual(expected, zhisper.notify.shouldNotify(.errors, kind));
     }
+}
+
+test "a live provider change reaches the per-job transcribe config" {
+    const gpa = std.testing.allocator;
+    var live = try zhisper.config_live.Live.init(gpa, zhisper.config.defaultConfig());
+    defer live.deinit();
+    var next = live.get();
+    next.transcribe.provider = "openai";
+    try live.replace(next);
+
+    const t = buildTranscribeConfig(live.get(), "k");
+    try std.testing.expectEqualStrings("https://api.openai.com/v1/audio/transcriptions", t.base_url);
+    try std.testing.expectEqualStrings("whisper-1", t.model);
+    try std.testing.expectEqualStrings("k", t.api_key);
 }

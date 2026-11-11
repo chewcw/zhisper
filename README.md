@@ -193,6 +193,24 @@ Notes:
 - `daemon.overlay` and `daemon.tray` are independent — the tray icon reflects state even when the floating pill is off, and vice versa.
 - `daemon.verbose` adds one metadata line per API call (model, payload sizes, status, latency, upstream error body). It never logs keys, audio, or transcripts.
 
+## Tray menu (Linux)
+
+Right-click the tray icon to change a setting. The selection is written to `config.toml` with every comment and every other line left untouched, and it applies immediately, with no restart.
+
+| Menu row | Config key it writes |
+|---|---|
+| Hotkey mode | `hotkey.mode` |
+| Normalize | `normalize.enabled` |
+| Styling | `normalize.styling` |
+| Structure | `normalize.structure` |
+| Context | `normalize.context` |
+| Provider | `transcribe.provider`, plus `transcribe.model` and `transcribe.base_url` set to `""` so the new provider's preset applies |
+| Overlay | `daemon.overlay` |
+
+- Each provider reads only its own key variable, so export every key you may switch to: `GROQ_API_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`. A provider whose key is absent is greyed out, because the daemon reads the environment only at startup.
+- Every other key is still read once at startup. Hand edits to those keys need a restart; only the rows in the table above apply live.
+- The menu is Linux-only for now. On Windows and macOS the icon works as before, without a menu.
+
 ## Key codes
 
 You choose which keys do what, in `[hotkey]`:

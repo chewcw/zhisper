@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("tray_types.zig");
 const zstbi = @import("zstbi");
+const tray_menu = @import("tray_menu.zig");
 
 const c = @cImport({
     @cInclude("X11/Xlib.h");
@@ -35,11 +36,35 @@ var state_masks: [3]c.Pixmap = .{ 0, 0, 0 };
 var current_state: types.State = .idle;
 var zstbi_ready = false;
 
+const xk_escape: c.KeySym = 0xFF1B;
+const menu_bg: c_ulong = 0x2b2b2b;
+const menu_border: c_ulong = 0x505050;
+const menu_fg: c_ulong = 0xe6e6e6;
+const menu_hover: c_ulong = 0x3c3c3c;
+const menu_dim: c_ulong = 0x6a6a6a;
+
+var host: ?types.MenuHost = null;
+var menu_font: ?*c.XFontStruct = null;
+var menu_window: c.Window = 0;
+var menu_gc: c.GC = @ptrFromInt(0);
+
+const MenuState = struct {
+    menu: tray_menu.Menu,
+    anchor: tray_menu.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    submenu: ?tray_menu.Submenu = null,
+    hover: ?usize = null,
+};
+
 fn stateIndex(state: types.State) usize {
     return @intFromEnum(state);
 }
 
 fn cleanupResources() void {
+    if (menu_font) |font| {
+        if (display) |d| _ = c.XFreeFont(d, font);
+        menu_font = null;
+    }
+    host = null;
     if (display) |d| {
         if (client_window != 0) {
             _ = c.XUnmapWindow(d, client_window);
@@ -174,7 +199,7 @@ fn clientIsEmbedded() bool {
     return parent != root;
 }
 
-pub fn setup(io: std.Io) !void {
+pub fn setup(io: std.Io, menu_host: types.MenuHost) !void {
     if (display != null) return;
 
     const d = c.XOpenDisplay(null) orelse return error.NoDisplay;
@@ -246,6 +271,13 @@ pub fn setup(io: std.Io) !void {
     }
 
     _ = c.XMapWindow(d, client_window);
+    _ = c.XSelectInput(d, client_window, c.ButtonPressMask);
+    host = menu_host;
+    // A missing core font disables only the menu: the icon must keep working.
+    menu_font = c.XLoadQueryFont(d, "fixed");
+    if (menu_font == null) {
+        std.log.scoped(.tray).debug("core font \"fixed\" missing; right-click menu disabled", .{});
+    }
     embedWithOwner(manager_owner);
     setState(io, .idle) catch {};
     _ = c.XSync(d, 0);
@@ -269,6 +301,7 @@ pub fn poll(_: std.Io) void {
     while (c.XPending(d) != 0) {
         var event: c.XEvent = undefined;
         _ = c.XNextEvent(d, &event);
+        if (event.type == c.ButtonPress and event.xbutton.button == 3) openMenu(d);
     }
 
     // i3bar and other tray managers can restart without the daemon. Their
@@ -283,6 +316,196 @@ pub fn poll(_: std.Io) void {
             // i3bar reload can keep the same selection window while
             // returning the client to the root window.
             embedWithOwner(owner);
+        }
+    }
+}
+
+fn openMenu(d: *c.Display) void {
+    const menu_host = host orelse return;
+    if (menu_font == null) return;
+
+    var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var menu_state = MenuState{
+        .menu = tray_menu.rootMenu(arena, current_state, menu_host.snapshot()) catch |err| {
+            std.log.scoped(.tray).debug("menu build failed: {s}", .{@errorName(err)});
+            return;
+        },
+    };
+
+    const screen = c.XDefaultScreen(d);
+    const root = c.XRootWindow(d, screen);
+    const advance: i32 = menu_font.?.max_bounds.width;
+    const w = tray_menu.width(menu_state.menu, advance);
+    const h = tray_menu.height(menu_state.menu);
+
+    var root_return: c.Window = 0;
+    var child: c.Window = 0;
+    var px: c_int = 0;
+    var py: c_int = 0;
+    var win_x: c_int = 0;
+    var win_y: c_int = 0;
+    var mask: c_uint = 0;
+    if (c.XQueryPointer(d, root, &root_return, &child, &px, &py, &win_x, &win_y, &mask) == 0) return;
+
+    // Anchor on the icon, not on the pointer: with the bar at an edge the
+    // pointer is already against that edge when the menu opens.
+    var icon_x: c_int = 0;
+    var icon_y: c_int = 0;
+    var ignored: c.Window = 0;
+    menu_state.anchor = if (c.XTranslateCoordinates(d, client_window, root, 0, 0, &icon_x, &icon_y, &ignored) != 0)
+        .{ .x = icon_x, .y = icon_y, .w = icon_size, .h = icon_size }
+    else
+        .{ .x = px - icon_size, .y = py - icon_size, .w = icon_size, .h = icon_size };
+
+    const pos = tray_menu.placeMenu(menu_state.anchor, w, h, c.XDisplayWidth(d, screen), c.XDisplayHeight(d, screen));
+
+    menu_window = c.XCreateSimpleWindow(d, root, pos.x, pos.y, @intCast(w), @intCast(h), 1, menu_border, menu_bg);
+    if (menu_window == 0) return;
+    var attributes: c.XSetWindowAttributes = std.mem.zeroes(c.XSetWindowAttributes);
+    attributes.override_redirect = 1;
+    _ = c.XChangeWindowAttributes(d, menu_window, c.CWOverrideRedirect, &attributes);
+    _ = c.XSelectInput(d, menu_window, c.ExposureMask | c.ButtonPressMask | c.ButtonReleaseMask | c.PointerMotionMask);
+    menu_gc = c.XCreateGC(d, menu_window, 0, null);
+    if (@intFromPtr(menu_gc) == 0) {
+        closeMenuWindow(d);
+        return;
+    }
+    _ = c.XSetFont(d, menu_gc, menu_font.?.fid);
+    _ = c.XMapRaised(d, menu_window);
+
+    const grab_mask = c.ButtonPressMask | c.ButtonReleaseMask | c.PointerMotionMask;
+    if (c.XGrabPointer(d, menu_window, 0, grab_mask, c.GrabModeAsync, c.GrabModeAsync, 0, 0, c.CurrentTime) != c.GrabSuccess) {
+        std.log.scoped(.tray).debug("menu pointer grab refused", .{});
+        closeMenuWindow(d);
+        return;
+    }
+    const keyboard_grabbed = c.XGrabKeyboard(d, menu_window, 0, c.GrabModeAsync, c.GrabModeAsync, c.CurrentTime) == c.GrabSuccess;
+
+    runMenuLoop(d, &menu_state, arena);
+
+    if (keyboard_grabbed) _ = c.XUngrabKeyboard(d, c.CurrentTime);
+    _ = c.XUngrabPointer(d, c.CurrentTime);
+    closeMenuWindow(d);
+}
+
+fn closeMenuWindow(d: *c.Display) void {
+    if (@intFromPtr(menu_gc) != 0) {
+        _ = c.XFreeGC(d, menu_gc);
+        menu_gc = @ptrFromInt(0);
+    }
+    if (menu_window != 0) {
+        _ = c.XDestroyWindow(d, menu_window);
+        menu_window = 0;
+    }
+}
+
+fn paint(d: *c.Display, menu_state: *MenuState) void {
+    const advance: i32 = menu_font.?.max_bounds.width;
+    const full_w = tray_menu.width(menu_state.menu, advance);
+    const full_h = tray_menu.height(menu_state.menu);
+    _ = c.XSetForeground(d, menu_gc, menu_bg);
+    _ = c.XFillRectangle(d, menu_window, menu_gc, 0, 0, @intCast(full_w), @intCast(full_h));
+
+    for (menu_state.menu.rows, 0..) |row, i| {
+        const y: i32 = @as(i32, @intCast(i)) * tray_menu.row_height;
+        switch (row) {
+            .separator => {
+                _ = c.XSetForeground(d, menu_gc, menu_border);
+                _ = c.XFillRectangle(d, menu_window, menu_gc, tray_menu.pad_x, y + @divTrunc(tray_menu.row_height, 2), @intCast(full_w - 2 * tray_menu.pad_x), 1);
+            },
+            .status => |text| {
+                _ = c.XSetForeground(d, menu_gc, menu_dim);
+                _ = c.XDrawString(d, menu_window, menu_gc, 2 * tray_menu.pad_x, y + 15, text.ptr, @intCast(text.len));
+            },
+            .item => |item| {
+                if (item.enabled and menu_state.hover == i) {
+                    _ = c.XSetForeground(d, menu_gc, menu_hover);
+                    _ = c.XFillRectangle(d, menu_window, menu_gc, 0, y, @intCast(full_w), tray_menu.row_height - 1);
+                }
+                if (item.checked) {
+                    _ = c.XSetForeground(d, menu_gc, menu_fg);
+                    _ = c.XFillRectangle(d, menu_window, menu_gc, tray_menu.pad_x, y + 8, 6, 6);
+                }
+                if (item.opens_submenu) {
+                    _ = c.XSetForeground(d, menu_gc, if (item.enabled) menu_fg else menu_dim);
+                    const right = full_w - tray_menu.pad_x;
+                    var tri = [_]c.XPoint{
+                        .{ .x = @intCast(right - 2 * advance), .y = @intCast(y + 8) },
+                        .{ .x = @intCast(right - advance), .y = @intCast(y + @divTrunc(tray_menu.row_height, 2)) },
+                        .{ .x = @intCast(right - 2 * advance), .y = @intCast(y + tray_menu.row_height - 8) },
+                    };
+                    _ = c.XFillPolygon(d, menu_window, menu_gc, &tri, @intCast(tri.len), c.Convex, c.CoordModeOrigin);
+                }
+                _ = c.XSetForeground(d, menu_gc, if (item.enabled) menu_fg else menu_dim);
+                const text_x = tray_menu.pad_x + 2 * advance;
+                _ = c.XDrawString(d, menu_window, menu_gc, text_x, y + 15, item.label.ptr, @intCast(item.label.len));
+            },
+        }
+    }
+    _ = c.XFlush(d);
+}
+
+fn openSubmenu(d: *c.Display, menu_state: *MenuState, arena: std.mem.Allocator, which: ?tray_menu.Submenu) void {
+    const menu_host = host orelse return;
+    const snapshot = menu_host.snapshot();
+    menu_state.menu = if (which) |sub|
+        tray_menu.submenu(arena, sub, snapshot, tray_menu.providerKeysFromEnv()) catch return
+    else
+        tray_menu.rootMenu(arena, current_state, snapshot) catch return;
+    menu_state.submenu = which;
+    menu_state.hover = null;
+    const advance: i32 = menu_font.?.max_bounds.width;
+    const w = tray_menu.width(menu_state.menu, advance);
+    const h = tray_menu.height(menu_state.menu);
+    const screen = c.XDefaultScreen(d);
+    const pos = tray_menu.placeMenu(menu_state.anchor, w, h, c.XDisplayWidth(d, screen), c.XDisplayHeight(d, screen));
+    // Move as well as resize: a taller submenu must grow away from the bar
+    // instead of running past the screen edge.
+    _ = c.XMoveResizeWindow(d, menu_window, pos.x, pos.y, @intCast(w), @intCast(h));
+    paint(d, menu_state);
+}
+
+fn runMenuLoop(d: *c.Display, menu_state: *MenuState, arena: std.mem.Allocator) void {
+    paint(d, menu_state);
+    while (true) {
+        var event: c.XEvent = undefined;
+        _ = c.XNextEvent(d, &event);
+        switch (event.type) {
+            c.Expose => paint(d, menu_state),
+            c.MotionNotify => {
+                const row = tray_menu.rowAt(menu_state.menu, event.xmotion.y);
+                if (row != menu_state.hover) {
+                    menu_state.hover = row;
+                    paint(d, menu_state);
+                }
+            },
+            c.ButtonPress => {
+                const row = tray_menu.rowAt(menu_state.menu, event.xbutton.y) orelse return;
+                const item = switch (menu_state.menu.rows[row]) {
+                    .item => |it| it,
+                    else => continue,
+                };
+                if (!item.enabled) continue;
+                switch (item.action) {
+                    .open_submenu => |sub| openSubmenu(d, menu_state, arena, sub),
+                    .back => openSubmenu(d, menu_state, arena, null),
+                    else => {
+                        if (host) |menu_host| menu_host.apply(item.action);
+                        return;
+                    },
+                }
+            },
+            c.KeyPress => {
+                if (c.XLookupKeysym(&event.xkey, 0) != xk_escape) continue;
+                if (menu_state.submenu != null) {
+                    openSubmenu(d, menu_state, arena, null);
+                } else {
+                    return;
+                }
+            },
+            else => {},
         }
     }
 }
