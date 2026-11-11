@@ -80,12 +80,14 @@ pub const Position = struct { x: i32, y: i32 };
 pub const Rect = struct { x: i32, y: i32, w: i32, h: i32 };
 
 /// Places the menu beside the anchor: above it when the anchor sits in the
-/// lower half of the screen, below it otherwise. The double comparison keeps
-/// the tie on the lower-half side without integer division rounding.
+/// lower half of the screen, below it otherwise, and to the left of the anchor
+/// when the anchor sits in the right half. The double comparison keeps each
+/// tie on the first half without integer division rounding.
 pub fn placeMenu(anchor: Rect, menu_w: i32, menu_h: i32, screen_w: i32, screen_h: i32) Position {
     const centre_y = anchor.y + @divTrunc(anchor.h, 2);
+    const centre_x = anchor.x + @divTrunc(anchor.w, 2);
     const preferred_y = if (centre_y * 2 <= screen_h) anchor.y + anchor.h else anchor.y - menu_h;
-    const preferred_x = if (anchor.x + menu_w > screen_w) anchor.x + anchor.w - menu_w else anchor.x;
+    const preferred_x = if (centre_x * 2 <= screen_w) anchor.x else anchor.x + anchor.w - menu_w;
     return .{
         .x = @max(0, @min(preferred_x, screen_w - menu_w)),
         .y = @max(0, @min(preferred_y, screen_h - menu_h)),
@@ -340,4 +342,21 @@ test "placeMenu clamps a menu taller than the space above the icon" {
 test "placeMenu clamps a menu larger than the screen to the origin" {
     const anchor = Rect{ .x = 500, .y = 500, .w = 22, .h = 22 };
     try std.testing.expectEqual(Position{ .x = 0, .y = 0 }, placeMenu(anchor, 2000, 1200, 1920, 1080));
+}
+
+test "placeMenu pulls the menu left when the icon is in the right half" {
+    const anchor = Rect{ .x = 1500, .y = 1050, .w = 22, .h = 22 };
+    // 1500 + 200 fits on a 1920 screen, so the old overflow-only rule left the
+    // menu hanging to the right of the icon.
+    try std.testing.expectEqual(Position{ .x = 1322, .y = 788 }, placeMenu(anchor, 200, 262, 1920, 1080));
+}
+
+test "placeMenu keeps a left-half icon left-aligned even when the menu is wide" {
+    const anchor = Rect{ .x = 800, .y = 1050, .w = 22, .h = 22 };
+    try std.testing.expectEqual(Position{ .x = 800, .y = 850 }, placeMenu(anchor, 400, 200, 1920, 1080));
+}
+
+test "placeMenu still clamps a wide menu from a left-half icon" {
+    const anchor = Rect{ .x = 700, .y = 1050, .w = 22, .h = 22 };
+    try std.testing.expectEqual(Position{ .x = 620, .y = 850 }, placeMenu(anchor, 1300, 200, 1920, 1080));
 }
