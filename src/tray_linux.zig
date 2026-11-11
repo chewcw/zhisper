@@ -50,6 +50,7 @@ var menu_gc: c.GC = @ptrFromInt(0);
 
 const MenuState = struct {
     menu: tray_menu.Menu,
+    anchor: tray_menu.Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     submenu: ?tray_menu.Submenu = null,
     hover: ?usize = null,
 };
@@ -347,7 +348,18 @@ fn openMenu(d: *c.Display) void {
     var win_y: c_int = 0;
     var mask: c_uint = 0;
     if (c.XQueryPointer(d, root, &root_return, &child, &px, &py, &win_x, &win_y, &mask) == 0) return;
-    const pos = tray_menu.clampPos(px, py, w, h, c.XDisplayWidth(d, screen), c.XDisplayHeight(d, screen));
+
+    // Anchor on the icon, not on the pointer: with the bar at an edge the
+    // pointer is already against that edge when the menu opens.
+    var icon_x: c_int = 0;
+    var icon_y: c_int = 0;
+    var ignored: c.Window = 0;
+    menu_state.anchor = if (c.XTranslateCoordinates(d, client_window, root, 0, 0, &icon_x, &icon_y, &ignored) != 0)
+        .{ .x = icon_x, .y = icon_y, .w = icon_size, .h = icon_size }
+    else
+        .{ .x = px - icon_size, .y = py - icon_size, .w = icon_size, .h = icon_size };
+
+    const pos = tray_menu.placeMenu(menu_state.anchor, w, h, c.XDisplayWidth(d, screen), c.XDisplayHeight(d, screen));
 
     menu_window = c.XCreateSimpleWindow(d, root, pos.x, pos.y, @intCast(w), @intCast(h), 1, menu_border, menu_bg);
     if (menu_window == 0) return;
@@ -445,7 +457,13 @@ fn openSubmenu(d: *c.Display, menu_state: *MenuState, arena: std.mem.Allocator, 
     menu_state.submenu = which;
     menu_state.hover = null;
     const advance: i32 = menu_font.?.max_bounds.width;
-    _ = c.XResizeWindow(d, menu_window, @intCast(tray_menu.width(menu_state.menu, advance)), @intCast(tray_menu.height(menu_state.menu)));
+    const w = tray_menu.width(menu_state.menu, advance);
+    const h = tray_menu.height(menu_state.menu);
+    const screen = c.XDefaultScreen(d);
+    const pos = tray_menu.placeMenu(menu_state.anchor, w, h, c.XDisplayWidth(d, screen), c.XDisplayHeight(d, screen));
+    // Move as well as resize: a taller submenu must grow away from the bar
+    // instead of running past the screen edge.
+    _ = c.XMoveResizeWindow(d, menu_window, pos.x, pos.y, @intCast(w), @intCast(h));
     paint(d, menu_state);
 }
 
