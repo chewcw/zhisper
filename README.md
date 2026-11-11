@@ -191,6 +191,7 @@ Notes:
 - The config is **strict**. An unrecognized key is a startup error rather than a silent no-op, so a typo tells you immediately instead of doing nothing.
 - `daemon.notify` accepts `off`, `errors`, `clipboard`, or `errors,clipboard`. It covers the outcomes that otherwise leave you guessing: too-short clip, silent clip, dropped waiting clip, transcription failure, empty transcript, clipboard failure, and clipboard ready (with a short preview).
 - `daemon.overlay` and `daemon.tray` are independent — the tray icon reflects state even when the floating pill is off, and vice versa.
+- `daemon.verbose` adds one metadata line per API call (model, payload sizes, status, latency, upstream error body). It never logs keys, audio, or transcripts.
 
 ## Tray menu (Linux)
 
@@ -209,7 +210,6 @@ Right-click the tray icon to change a setting. The selection is written to `conf
 - Each provider reads only its own key variable, so export every key you may switch to: `GROQ_API_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`. A provider whose key is absent is greyed out, because the daemon reads the environment only at startup.
 - Every other key is still read once at startup. Hand edits to those keys need a restart; only the rows in the table above apply live.
 - The menu is Linux-only for now. On Windows and macOS the icon works as before, without a menu.
-- `daemon.verbose` adds one metadata line per API call (model, payload sizes, status, latency, upstream error body). It never logs keys, audio, or transcripts.
 
 ## Key codes
 
