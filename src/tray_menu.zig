@@ -77,6 +77,7 @@ pub fn rowAt(menu: Menu, y: i32) ?usize {
 }
 
 pub const Position = struct { x: i32, y: i32 };
+pub const Rect = struct { x: i32, y: i32, w: i32, h: i32 };
 
 /// Shifts the menu left or up so it fits on the screen. On a screen smaller
 /// than the menu the result is 0, never negative.
@@ -84,6 +85,19 @@ pub fn clampPos(x: i32, y: i32, w: i32, h: i32, screen_w: i32, screen_h: i32) Po
     return .{
         .x = @max(0, @min(x, screen_w - w)),
         .y = @max(0, @min(y, screen_h - h)),
+    };
+}
+
+/// Places the menu beside the anchor: above it when the anchor sits in the
+/// lower half of the screen, below it otherwise. The double comparison keeps
+/// the tie on the lower-half side without integer division rounding.
+pub fn placeMenu(anchor: Rect, menu_w: i32, menu_h: i32, screen_w: i32, screen_h: i32) Position {
+    const centre_y = anchor.y + @divTrunc(anchor.h, 2);
+    const preferred_y = if (centre_y * 2 <= screen_h) anchor.y + anchor.h else anchor.y - menu_h;
+    const preferred_x = if (anchor.x + menu_w > screen_w) anchor.x + anchor.w - menu_w else anchor.x;
+    return .{
+        .x = @max(0, @min(preferred_x, screen_w - menu_w)),
+        .y = @max(0, @min(preferred_y, screen_h - menu_h)),
     };
 }
 
@@ -322,4 +336,29 @@ test "clampPos keeps the menu inside the screen and off the top-left edge" {
 test "clampPos never returns a negative offset on a tiny screen" {
     const Pos = Position;
     try std.testing.expectEqual(Pos{ .x = 0, .y = 0 }, clampPos(50, 50, 400, 300, 320, 200));
+}
+
+test "placeMenu opens upward when the icon sits in the lower half" {
+    const anchor = Rect{ .x = 100, .y = 1050, .w = 22, .h = 22 };
+    try std.testing.expectEqual(Position{ .x = 100, .y = 788 }, placeMenu(anchor, 200, 262, 1920, 1080));
+}
+
+test "placeMenu opens downward when the icon sits in the upper half" {
+    const anchor = Rect{ .x = 100, .y = 0, .w = 22, .h = 22 };
+    try std.testing.expectEqual(Position{ .x = 100, .y = 22 }, placeMenu(anchor, 200, 262, 1920, 1080));
+}
+
+test "placeMenu flips left when the icon is near the right edge" {
+    const anchor = Rect{ .x = 1900, .y = 1050, .w = 22, .h = 22 };
+    try std.testing.expectEqual(Position{ .x = 1720, .y = 788 }, placeMenu(anchor, 200, 262, 1920, 1080));
+}
+
+test "placeMenu clamps a menu taller than the space above the icon" {
+    const anchor = Rect{ .x = 100, .y = 1050, .w = 22, .h = 22 };
+    try std.testing.expectEqual(Position{ .x = 100, .y = 0 }, placeMenu(anchor, 200, 1200, 1920, 1080));
+}
+
+test "placeMenu clamps a menu larger than the screen to the origin" {
+    const anchor = Rect{ .x = 500, .y = 500, .w = 22, .h = 22 };
+    try std.testing.expectEqual(Position{ .x = 0, .y = 0 }, placeMenu(anchor, 2000, 1200, 1920, 1080));
 }
