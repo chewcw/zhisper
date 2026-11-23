@@ -972,3 +972,82 @@ test "a chord cancel preempts another chord ready on the same modifier press" {
     try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
     try std.testing.expect(pollEvent() == null);
 }
+
+test "one config fires record, cancel, clipboard and search" {
+    const sc = @import("shortcut.zig");
+    // Record is the bare default, the other three need meta, and each action
+    // has its own key so the config is one the daemon accepts at startup.
+    const record = try sc.parse("f9");
+    const cancel = try sc.parse("meta+f8");
+    const clipboard = try sc.parse("meta+f10");
+    const search = try sc.parse("meta+f11");
+    const cfg = HotkeyConfig{
+        .shortcut = .{ .chord = record },
+        .cancel = .{ .chord = cancel },
+        .clipboard = .{ .chord = clipboard },
+        .search = .{ .chord = search },
+    };
+    // setup refuses a config where two actions name one key, so the fixture
+    // must pass the same check or the test would prove nothing about the
+    // bindings a user can actually run.
+    try std.testing.expect(types.mixedKindCollision(cfg, nativeCode) == null);
+
+    const Row = struct {
+        name: []const u8,
+        chord: shortcut.Shortcut,
+        code: u16,
+        press: KeyEvent,
+        release: ?KeyEvent,
+    };
+    const rows = [_]Row{
+        .{ .name = "shortcut", .chord = record, .code = 67, .press = .hotkey_pressed, .release = .hotkey_released },
+        .{ .name = "cancel", .chord = cancel, .code = 66, .press = .cancel_pressed, .release = null },
+        .{ .name = "clipboard", .chord = clipboard, .code = 68, .press = .clipboard_pressed, .release = .clipboard_released },
+        .{ .name = "search", .chord = search, .code = 87, .press = .search_pressed, .release = .search_released },
+    };
+
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    const saved_fd = fd_evdev;
+    const saved_cfg = active_cfg;
+    defer {
+        fd_evdev = saved_fd;
+        active_cfg = saved_cfg;
+    }
+    setFdForTest(fds[0], cfg);
+
+    for (rows) |row| {
+        const needs_meta = row.chord.modifiers.meta;
+        if (needs_meta) try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1);
+        try writeTestEvent(fds[1], c.EV_KEY, row.code, 1);
+        const pressed = pollEvent();
+        if (pressed != row.press) {
+            std.debug.print("{s}: expected {s} on key down, got {s}\n", .{
+                row.name,
+                @tagName(row.press),
+                if (pressed) |e| @tagName(e) else "no event",
+            });
+            return error.BindingEventMismatch;
+        }
+        try writeTestEvent(fds[1], c.EV_KEY, row.code, 0);
+        const released = pollEvent();
+        if (released != row.release) {
+            std.debug.print("{s}: expected {s} on key up, got {s}\n", .{
+                row.name,
+                if (row.release) |e| @tagName(e) else "no event",
+                if (released) |e| @tagName(e) else "no event",
+            });
+            return error.BindingEventMismatch;
+        }
+        if (needs_meta) try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 0);
+        const leftover = pollEvent();
+        if (leftover != null) {
+            std.debug.print("{s}: unexpected extra event {s}\n", .{ row.name, @tagName(leftover.?) });
+            return error.BindingEventMismatch;
+        }
+    }
+}
