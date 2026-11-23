@@ -26,7 +26,9 @@ pub const NormalizeCfg = struct {
     context: []const u8 = "general",
 };
 
-pub const default_shortcut = "meta+f9";
+// WHY bare: F9 was the default before shortcut strings existed, and a function
+// key produces no character, so it needs no modifier to be safe to type after.
+pub const default_shortcut = "f9";
 pub const default_cancel = "meta+f8";
 pub const default_clipboard = "meta+f10";
 pub const default_search = "off";
@@ -809,9 +811,9 @@ test "cancel_key_code defaults to 46 and overlays via env struct" {
     try std.testing.expectEqual(@as(?i16, 48), out.hotkey.cancel_key_code);
 }
 
-test "validate rejects a cancel binding that collides with the hotkey" {
+test "validate rejects a cancel binding that resolves to the hotkey's key" {
     var cfg = defaultConfig();
-    cfg.hotkey.cancel = "meta+f9";
+    cfg.hotkey.cancel = "f9";
     try std.testing.expectError(error.ShortcutCollision, validate(cfg));
 }
 
@@ -1016,7 +1018,7 @@ test "validate accepts a clipboard key distinct from both other keys" {
 
 test "validate rejects a clipboard key colliding with the hotkey or the cancel key" {
     var a = defaultConfig();
-    a.hotkey.clipboard = "meta+f9";
+    a.hotkey.clipboard = "f9";
     try std.testing.expectError(error.ShortcutCollision, validate(a));
     var b = defaultConfig();
     b.hotkey.clipboard = "meta+f8";
@@ -1150,10 +1152,11 @@ test "parseFileConfig still rejects unknown transcribe keys after allowlist chan
     try std.testing.expectError(error.UnknownField, parseFileConfig(gpa, io, "cfg-lang-typo.toml"));
 }
 
-test "default config resolves to the meta-chorded function keys" {
+test "default config records on a bare F9 and keeps meta chords elsewhere" {
     const cfg = defaultConfig();
+    try validate(cfg);
     const hk = try resolveHotkeys(cfg.hotkey);
-    try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("meta+f9") }));
+    try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("f9") }));
     try std.testing.expect(hk.cancel.eql(.{ .chord = try shortcut.parse("meta+f8") }));
     try std.testing.expect(hk.clipboard.?.eql(.{ .chord = try shortcut.parse("meta+f10") }));
     try std.testing.expect(hk.search == null);
@@ -1165,7 +1168,7 @@ test "the off token disables an action and an empty string keeps the default" {
     // search defaults to off as well, so an empty string and the token agree.
     try std.testing.expect(hk.search == null);
     const record = try resolveHotkeys(.{ .shortcut = "", .key_code = null });
-    try std.testing.expect(record.shortcut.eql(.{ .chord = try shortcut.parse("meta+f9") }));
+    try std.testing.expect(record.shortcut.eql(.{ .chord = try shortcut.parse("f9") }));
 }
 
 test "a shortcut string is parsed and a legacy integer becomes a raw code" {
@@ -1191,7 +1194,7 @@ test "a negative legacy code disables the optional actions even against a defaul
 
 test "two actions on the same binding fail validation" {
     var cfg = defaultConfig();
-    cfg.hotkey.cancel = "meta+f9";
+    cfg.hotkey.cancel = "f9";
     try std.testing.expectError(error.ShortcutCollision, validate(cfg));
 
     var legacy = defaultConfig();
@@ -1220,7 +1223,7 @@ test "every string setting survives dupe and free" {
     defer freeConfig(gpa, owned);
     try std.testing.expectEqualStrings("meta+8", owned.hotkey.clipboard);
     try std.testing.expectEqualStrings("meta+9", owned.hotkey.search);
-    try std.testing.expectEqualStrings("meta+f9", owned.hotkey.shortcut);
+    try std.testing.expectEqualStrings("f9", owned.hotkey.shortcut);
     try std.testing.expectEqualStrings("meta+f8", owned.hotkey.cancel);
 }
 

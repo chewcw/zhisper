@@ -388,7 +388,7 @@ test "root menu lists the record, cancel and clipboard shortcuts as read-only ro
     defer arena_state.deinit();
     const menu = try testMenu(arena_state.allocator(), config.defaultConfig());
 
-    const labels = [_][]const u8{ "Record: Meta+F9", "Cancel: Meta+F8", "Clipboard: Meta+F10" };
+    const labels = [_][]const u8{ "Record: F9", "Cancel: Meta+F8", "Clipboard: Meta+F10" };
     for (labels, 0..) |want, i| {
         const row = menu.rows[i + 3];
         try std.testing.expect(row == .info);
