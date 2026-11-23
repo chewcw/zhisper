@@ -393,9 +393,18 @@ pub fn parse(text: []const u8) ParseError!Shortcut {
     const key_tok = key_token orelse return error.MissingKey;
     const key = try resolveKeyName(key_tok);
 
-    if (!modifiers.meta) return error.MissingMetaModifier;
+    // WHY a function key may stand alone: the meta requirement keeps a
+    // modifier from still being held when the transcript is typed, and a
+    // function key produces no character and holds no modifier. Letters,
+    // digits and named keys keep the requirement because they type text.
+    if (!modifiers.meta and !isFunctionKey(key)) return error.MissingMetaModifier;
 
     return .{ .modifiers = modifiers, .key = key };
+}
+
+fn isFunctionKey(name: KeyName) bool {
+    return @intFromEnum(name) >= @intFromEnum(KeyName.f1) and
+        @intFromEnum(name) <= @intFromEnum(KeyName.f24);
 }
 
 test "parse accepts a modifier and a key in any letter case" {
@@ -445,6 +454,23 @@ test "parse rejects every malformed shape with its own error" {
     try std.testing.expectError(t.ParseError.UnknownKey, t.parse("meta++8"));
     try std.testing.expectError(t.ParseError.TooManyParts, t.parse("meta+a+b"));
     try std.testing.expectError(t.ParseError.TooManyParts, t.parse("a+meta+b"));
+}
+
+test "a bare function key parses with no modifiers" {
+    const t = @import("shortcut.zig");
+    const f9 = try t.parse("f9");
+    try std.testing.expect(!f9.modifiers.meta);
+    try std.testing.expect(!f9.modifiers.shift);
+    try std.testing.expectEqual(t.KeyName.f9, f9.key);
+    try std.testing.expectEqual(t.KeyName.f24, (try t.parse("F24")).key);
+    var buf: [32]u8 = undefined;
+    try std.testing.expectEqualStrings("F9", try f9.format(&buf));
+}
+
+test "a bare key that can type text still needs meta" {
+    const t = @import("shortcut.zig");
+    try std.testing.expectError(t.ParseError.MissingMetaModifier, t.parse("0"));
+    try std.testing.expectError(t.ParseError.MissingMetaModifier, t.parse("space"));
 }
 
 test "format prints the canonical spelling" {
