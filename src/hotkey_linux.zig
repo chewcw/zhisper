@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const types = @import("hotkey_types.zig");
+const shortcut = @import("shortcut.zig");
 
 pub const KeyEvent = types.KeyEvent;
 pub const Mode = types.Mode;
@@ -14,6 +15,136 @@ const c = @cImport({
 
 var fd_evdev: posix.fd_t = -1;
 var active_cfg: HotkeyConfig = .{ .shortcut = .{ .raw_code = 0 }, .cancel = .{ .raw_code = 0 } };
+
+// src/hotkey_linux.zig — KEY_A..KEY_Z are not contiguous, so the table is written out.
+const letters = [26]u16{ 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44 };
+const fkeys = [24]u16{ 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194 };
+// KEY_1..KEY_9 ascend to KEY_0, which sits last at 11.
+const digit_base = 2;
+// Modifier codes the chord state machine has to follow.
+const KEY_LEFTMETA_C = 125;
+const KEY_RIGHTMETA_C = 126;
+const KEY_LEFTSHIFT_C = 42;
+const KEY_RIGHTSHIFT_C = 54;
+
+const meta_bit: u16 = 1 << 0;
+const shift_bit: u16 = 1 << 1;
+
+var held: std.atomic.Value(u16) = .init(0);
+const Latched = enum { shortcut, clipboard, search };
+
+// WHY one latched slot instead of a slot per binding: pressing a second
+// binding while one is held would otherwise report two presses with no
+// matching release, and main.zig would think two recordings are live.
+var latched: ?Latched = null;
+var chord_key_down = [_]bool{ false, false, false };
+
+fn bindingForLatched(kind: Latched) shortcut.Binding {
+    return switch (kind) {
+        .shortcut => active_cfg.shortcut,
+        .clipboard => active_cfg.clipboard orelse .{ .raw_code = 0 },
+        .search => active_cfg.search orelse .{ .raw_code = 0 },
+    };
+}
+
+fn pressedEvent(kind: Latched) KeyEvent {
+    return switch (kind) {
+        .shortcut => .hotkey_pressed,
+        .clipboard => .clipboard_pressed,
+        .search => .search_pressed,
+    };
+}
+
+fn releasedEvent(kind: Latched) KeyEvent {
+    return switch (kind) {
+        .shortcut => .hotkey_released,
+        .clipboard => .clipboard_released,
+        .search => .search_released,
+    };
+}
+
+fn chordOf(b: shortcut.Binding) ?shortcut.Shortcut {
+    return switch (b) {
+        .chord => |ch| ch,
+        .raw_code => null,
+    };
+}
+
+fn chordModifiersSatisfied(ch: shortcut.Shortcut) bool {
+    const h = held.load(.acquire);
+    if (ch.modifiers.meta and (h & meta_bit) == 0) return false;
+    if (ch.modifiers.shift and (h & shift_bit) == 0) return false;
+    return true;
+}
+
+fn isModifierCode(code: u16) bool {
+    return code == KEY_LEFTMETA_C or code == KEY_RIGHTMETA_C or code == KEY_LEFTSHIFT_C or code == KEY_RIGHTSHIFT_C;
+}
+
+fn modifierBit(code: u16) ?u16 {
+    if (code == KEY_LEFTMETA_C or code == KEY_RIGHTMETA_C) return meta_bit;
+    if (code == KEY_LEFTSHIFT_C or code == KEY_RIGHTSHIFT_C) return shift_bit;
+    return null;
+}
+
+fn chordRequiresModifier(ch: shortcut.Shortcut, bit: u16) bool {
+    return (bit == meta_bit and ch.modifiers.meta) or (bit == shift_bit and ch.modifiers.shift);
+}
+
+fn latchedRequiresModifier(kind: Latched, bit: u16) bool {
+    const ch = chordOf(bindingForLatched(kind)) orelse return false;
+    return chordRequiresModifier(ch, bit);
+}
+
+fn nativeCode(name: shortcut.KeyName) ?u16 {
+    const idx = @intFromEnum(name);
+    const a_idx = @intFromEnum(shortcut.KeyName.a);
+    const z_idx = @intFromEnum(shortcut.KeyName.z);
+    if (idx >= a_idx and idx <= z_idx) {
+        return letters[idx - a_idx];
+    }
+    const d0_idx = @intFromEnum(shortcut.KeyName.d0);
+    const d9_idx = @intFromEnum(shortcut.KeyName.d9);
+    if (idx >= d0_idx and idx <= d9_idx) {
+        const n: u16 = @intCast(idx - d0_idx);
+        if (n == 0) return 11;
+        return digit_base + n - 1;
+    }
+    const f1_idx = @intFromEnum(shortcut.KeyName.f1);
+    const f24_idx = @intFromEnum(shortcut.KeyName.f24);
+    if (idx >= f1_idx and idx <= f24_idx) {
+        return fkeys[idx - f1_idx];
+    }
+    return switch (name) {
+        .space => 57,
+        .enter => 28,
+        .tab => 15,
+        .esc => 1,
+        .backspace => 14,
+        .delete => 111,
+        .insert => 110,
+        .home => 102,
+        .end => 107,
+        .pageup => 104,
+        .pagedown => 109,
+        .left => 105,
+        .right => 106,
+        .up => 103,
+        .down => 108,
+        .minus => 12,
+        .equal => 13,
+        .comma => 51,
+        .period => 52,
+        .slash => 53,
+        .backslash => 43,
+        .semicolon => 39,
+        .quote => 40,
+        .bracketleft => 26,
+        .bracketright => 27,
+        .grave => 41,
+        else => null,
+    };
+}
 
 fn closeFd(fd: posix.fd_t) void {
     _ = std.os.linux.close(fd);
@@ -168,11 +299,68 @@ pub fn pollEvent() ?KeyEvent {
     // https://www.kernel.org/doc/html/latest/input/input.html (section 1.5)
     var ev: c.struct_input_event = undefined;
     const bytes = std.mem.asBytes(&ev);
-    while (true) {
+    outer: while (true) {
         const n = std.os.linux.read(fd_evdev, bytes.ptr, bytes.len);
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
-        // log.debug("ev code={d} value={d} (want talk={d} clipboard={?d} cancel={d} search={?d})", .{ ev.code, ev.value, types.rawCode(active_cfg.shortcut) orelse 0, if (active_cfg.clipboard) |b| types.rawCode(b) else null, types.rawCode(active_cfg.cancel) orelse 0, if (active_cfg.search) |b| types.rawCode(b) else null });
+        // log.debug("ev code={d} value={d}", .{ ev.code, ev.value });
+
+        // 1) Modifier bookkeeping: value 1 sets, 0 clears, 2 ignored.
+        if (modifierBit(@intCast(ev.code))) |bit| {
+            if (ev.value == 1) {
+                _ = held.fetchOr(bit, .acq_rel);
+                if (latched == null) {
+                    const candidates = [_]Latched{ .shortcut, .clipboard, .search };
+                    for (candidates) |kind| {
+                        if (!chord_key_down[@intFromEnum(kind)]) continue;
+                        const ch = chordOf(bindingForLatched(kind)) orelse continue;
+                        if (!chordModifiersSatisfied(ch)) continue;
+                        latched = kind;
+                        return pressedEvent(kind);
+                    }
+                }
+            } else if (ev.value == 0) {
+                _ = held.fetchAnd(~bit, .acq_rel);
+                // 2) Modifier up: release latched chord if it required this modifier.
+                if (latched) |kind| {
+                    if (latchedRequiresModifier(kind, bit)) {
+                        latched = null;
+                        return releasedEvent(kind);
+                    }
+                }
+            }
+            // Autorepeat on modifier: ignored.
+            continue;
+        }
+
+        // 3) Chord bindings for record / clipboard / search.
+        const candidates = [_]Latched{ .shortcut, .clipboard, .search };
+        for (candidates) |kind| {
+            const b = bindingForLatched(kind);
+            const ch = chordOf(b) orelse continue;
+            const key_code = nativeCode(ch.key) orelse continue;
+            if (ev.code != key_code) continue;
+
+            if (ev.value == 1) {
+                chord_key_down[@intFromEnum(kind)] = true;
+                if (latched != null) continue :outer; // another binding already latched
+                if (!chordModifiersSatisfied(ch)) continue :outer;
+                latched = kind;
+                return pressedEvent(kind);
+            }
+            if (ev.value == 0) {
+                chord_key_down[@intFromEnum(kind)] = false;
+                if (latched == kind) {
+                    latched = null;
+                    return releasedEvent(kind);
+                }
+                continue :outer;
+            }
+            // autorepeat: swallow
+            continue :outer;
+        }
+
+        // 5) Raw-code bindings keep today's behaviour exactly.
         // Hotkey first so a misconfigured cancel == hotkey degrades to hotkey.
         if (types.rawCode(active_cfg.shortcut)) |hk| {
             if (ev.code == hk) {
@@ -209,19 +397,26 @@ pub fn pollEvent() ?KeyEvent {
 }
 
 pub fn modifiersHeld() bool {
-    return false;
+    return (held.load(.acquire) & (meta_bit | shift_bit)) != 0;
 }
 
 pub fn destroy() void {
     if (fd_evdev < 0) return;
     closeFd(fd_evdev);
     fd_evdev = -1;
+    held.store(0, .release);
+    latched = null;
+    chord_key_down = [_]bool{ false, false, false };
 }
 
 fn setFdForTest(fd: posix.fd_t, config: HotkeyConfig) void {
-    if (fd_evdev >= 0) destroy();
+    // Do not close the previous fd here: tests own their pipe fds and may
+    // have already closed them, so closing a stale fd number can hit a reused fd.
     fd_evdev = fd;
     active_cfg = config;
+    held.store(0, .release);
+    latched = null;
+    chord_key_down = [_]bool{ false, false, false };
 }
 
 fn writeTestEvent(fd: posix.fd_t, ev_type: u16, code: u16, value: i32) !void {
@@ -442,4 +637,115 @@ test "search key of 0 never fires" {
     try writeTestEvent(fds[1], c.EV_KEY, 65, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 65, 0);
     try std.testing.expect(pollEvent() == null);
+}
+
+test "nativeCode maps every portable key name to its evdev code" {
+    try std.testing.expectEqual(@as(?u16, 30), nativeCode(.a));
+    try std.testing.expectEqual(@as(?u16, 44), nativeCode(.z));
+    try std.testing.expectEqual(@as(?u16, 11), nativeCode(.d0));
+    try std.testing.expectEqual(@as(?u16, 2), nativeCode(.d1));
+    try std.testing.expectEqual(@as(?u16, 59), nativeCode(.f1));
+    try std.testing.expectEqual(@as(?u16, 68), nativeCode(.f10));
+    try std.testing.expectEqual(@as(?u16, 87), nativeCode(.f11));
+    try std.testing.expectEqual(@as(?u16, 88), nativeCode(.f12));
+    try std.testing.expectEqual(@as(?u16, 183), nativeCode(.f13));
+    try std.testing.expectEqual(@as(?u16, 194), nativeCode(.f24));
+    try std.testing.expectEqual(@as(?u16, 57), nativeCode(.space));
+    try std.testing.expectEqual(@as(?u16, 28), nativeCode(.enter));
+    try std.testing.expectEqual(@as(?u16, 1), nativeCode(.esc));
+    try std.testing.expectEqual(@as(?u16, 111), nativeCode(.delete));
+    try std.testing.expectEqual(@as(?u16, 41), nativeCode(.grave));
+}
+
+test "a meta chord fires only while meta is held" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+8") },
+        .cancel = .{ .raw_code = 46 },
+    });
+    // The key alone must stay silent: the modifier is part of the binding.
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 1);
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 0);
+    try std.testing.expect(pollEvent() == null);
+    // meta down, then the key: this is the chord.
+    try writeTestEvent(fds[1], c.EV_KEY, 125, 1);
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 1);
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    // Releasing meta alone ends the chord, without waiting for the key.
+    try writeTestEvent(fds[1], c.EV_KEY, 125, 0);
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 0);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "a chord registers whichever key goes down first" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+f2") },
+        .cancel = .{ .raw_code = 46 },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, 60, 1); // key first
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 126, 1); // right meta second
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 60, 0); // key up first
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 126, 0);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "a meta+shift chord needs shift too, and swallows its autorepeat" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+shift+z") },
+        .cancel = .{ .raw_code = 46 },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, 125, 1);
+    try writeTestEvent(fds[1], c.EV_KEY, 44, 1); // z without shift: no chord
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 42, 1); // left shift: chord forms
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 44, 2); // key autorepeat: silent
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 42, 0); // shift up ends it
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+}
+
+test "modifiersHeld tracks meta and shift and ignores repeats" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 } });
+    try std.testing.expect(!modifiersHeld());
+    try writeTestEvent(fds[1], c.EV_KEY, 54, 1); // right shift
+    _ = pollEvent();
+    try std.testing.expect(modifiersHeld());
+    try writeTestEvent(fds[1], c.EV_KEY, 54, 2); // autorepeat must not double count
+    _ = pollEvent();
+    try writeTestEvent(fds[1], c.EV_KEY, 54, 0);
+    _ = pollEvent();
+    try std.testing.expect(!modifiersHeld());
 }
