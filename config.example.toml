@@ -12,27 +12,17 @@ prompt = ""       # Used by openai, groq, and custom; ignored by deepgram.
 language = ""     # deepgram: empty = auto, else a BCP-47 tag.
 keyterm = ""      # deepgram: comma-separated terms to boost.
 
-# Key codes are OS-native and are NOT interchangeable between platforms.
-#           Linux  macOS  Windows
-#   A        30     0      0x41
-#   C        46     8      0x43
-#   F9       67     0x78   0x78
-#   F11      87     0x6A   0x7A
-#   Return   28     36     0x0D
-#   Tab      15     48     0x09
-# Use -1 to disable a key. 0 is a real key (macOS 'A'), not "disabled".
+# Deprecated integer fields still work: key_code, cancel_key_code,
+# clipboard_key_code, search_key_code. An empty string falls back to the
+# default; use "off" to disable an action.
 [hotkey]
-key_code = 67     # OS-native; -1 disables. Linux KEY_F9=67 / macOS kVK_F9=0x78 / Windows VK_F9=0x78
-mode = "hold"     # hold | toggle
-cancel_key_code = 46  # OS-native; -1 disables. Linux KEY_C=46 / macOS kVK_C=8 / Windows VK_C=0x43
-clipboard_key_code = -1  # OS-native; -1 or absent = off. Linux KEY_F11=87 / macOS kVK_F11=0x6A /
-                        # Windows VK_F11=0x7A. A recording started with this key puts the
-                        # transcript in the clipboard instead of typing it anywhere.
-search_key_code = -1    # OS-native; -1 or absent = off. A recording started with this
-                        # key opens a web search for the transcript (see [search]).
-
-evdev = ""        # Linux only, explicit /dev/input/eventN (empty = off, wins over evdev_name)
-evdev_name = ""   # Linux only, device name match e.g. "kanata" (empty = off, wins over auto-scan)
+shortcut = "meta+f9"   # meta = Super (Linux) / Win (Windows). Required. See "Shortcuts" in the README.
+cancel = "meta+f8"     # discard the recording in progress; "off" disables it
+clipboard = "meta+f10" # record, then put the transcript on the clipboard; "off" disables it
+search = "off"         # record, then search for the transcript (see [search]); "off" disables it
+mode = "hold"          # hold | toggle
+evdev = ""             # Linux only, explicit /dev/input/eventN (empty = off, wins over evdev_name)
+evdev_name = ""        # Linux only, device name match e.g. "kanata" (empty = off, wins over auto-scan)
 
 [audio]
 device = ""       # empty = system default mic
