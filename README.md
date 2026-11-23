@@ -122,6 +122,8 @@ options:
       --hotkey=<str>             record shortcut (default meta+f9)
       --mode=<str>               hold | toggle
       --cancel=<str>             cancel shortcut (default meta+f8)
+      --clipboard=<str>          clipboard shortcut (default meta+f10)
+      --search=<str>             search shortcut (default off)
       --key-code=<uint>          deprecated: use --hotkey
       --evdev=<str>              Linux evdev path/name:DEV (empty = auto-scan)
       --device=<str>             mic (empty = default)
@@ -245,7 +247,7 @@ A chord fires only while every modifier is down, in any press order, and stops w
 
 Defaults changed: a config with no `[hotkey]` section now records on `meta+f9`, cancels on `meta+f8`, and puts the transcript on the clipboard on `meta+f10` instead of typing it. A recording started with `meta+f10` goes to the clipboard, not into the focused app. Search stays off.
 
-The defaults are the old bare keys with a `meta` chord on them, so a user who upgrades from `key_code = 67` reaches for the same key plus Super/Win.
+The defaults are the old bare keys with a `meta` chord on them, so an upgrade from `key_code = 67` keeps the same key, now with Super/Win.
 
 The old numeric settings (`key_code`, `cancel_key_code`, `clipboard_key_code`, `search_key_code`) still work with no modifier and log a deprecation line. A shortcut string wins over a number for the same action. Numeric codes remain accepted for old configs.
 

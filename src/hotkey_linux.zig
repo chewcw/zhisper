@@ -245,7 +245,11 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("using explicit evdev {s} (key={d}, cancel={d})", .{ path, types.rawCode(config.shortcut) orelse 0, types.rawCode(config.cancel) orelse 0 });
+            var b_shortcut: [32]u8 = undefined;
+            var b_cancel: [32]u8 = undefined;
+            const key_label = config.shortcut.format(&b_shortcut) catch "?";
+            const cancel_label = config.cancel.format(&b_cancel) catch "?";
+            log.info("using explicit evdev {s} (key={s}, cancel={s})", .{ path, key_label, cancel_label });
             return;
         }
         return error.DeviceNotFound;
@@ -265,7 +269,11 @@ pub fn setup(config: HotkeyConfig) !void {
             if (try openPath(path)) |fd| {
                 fd_evdev = fd;
                 active_cfg = config;
-                log.info("name match '{s}' -> {s} (key={d}, cancel={d})", .{ want, path, types.rawCode(config.shortcut) orelse 0, types.rawCode(config.cancel) orelse 0 });
+                var b_shortcut: [32]u8 = undefined;
+                var b_cancel: [32]u8 = undefined;
+                const key_label = config.shortcut.format(&b_shortcut) catch "?";
+                const cancel_label = config.cancel.format(&b_cancel) catch "?";
+                log.info("name match '{s}' -> {s} (key={s}, cancel={s})", .{ want, path, key_label, cancel_label });
                 return;
             }
         }
@@ -284,7 +292,11 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("auto-scan picked {s} (key={d}, cancel={d})", .{ path, types.rawCode(config.shortcut) orelse 0, types.rawCode(config.cancel) orelse 0 });
+            var b_shortcut: [32]u8 = undefined;
+            var b_cancel: [32]u8 = undefined;
+            const key_label = config.shortcut.format(&b_shortcut) catch "?";
+            const cancel_label = config.cancel.format(&b_cancel) catch "?";
+            log.info("auto-scan picked {s} (key={s}, cancel={s})", .{ path, key_label, cancel_label });
             return;
         }
     }

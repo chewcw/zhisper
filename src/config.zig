@@ -1232,9 +1232,10 @@ test "legacy-only file key_code resolves to raw code and keeps default clipboard
         \\key_code = 70
         \\
     ;
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-legacy-only.toml", .data = doc });
-    defer std.Io.Dir.cwd().deleteFile(io, "cfg-legacy-only.toml") catch {};
-    const cfg = try parseFileConfig(gpa, io, "cfg-legacy-only.toml");
+    const path = "/tmp/zhisper-config-legacy-only-test.toml";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const cfg = try parseFileConfig(gpa, io, path);
     defer freeConfig(gpa, cfg);
     const hk = try resolveHotkeys(cfg.hotkey);
     try std.testing.expect(hk.shortcut.eql(.{ .raw_code = 70 }));
@@ -1249,9 +1250,10 @@ test "legacy-only file clipboard_key_code -1 leaves clipboard action null" {
         \\clipboard_key_code = -1
         \\
     ;
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-legacy-clip-off.toml", .data = doc });
-    defer std.Io.Dir.cwd().deleteFile(io, "cfg-legacy-clip-off.toml") catch {};
-    const cfg = try parseFileConfig(gpa, io, "cfg-legacy-clip-off.toml");
+    const path = "/tmp/zhisper-config-legacy-clip-off-test.toml";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const cfg = try parseFileConfig(gpa, io, path);
     defer freeConfig(gpa, cfg);
     const hk = try resolveHotkeys(cfg.hotkey);
     try std.testing.expect(hk.clipboard == null);
@@ -1266,9 +1268,10 @@ test "shortcut string wins over legacy key_code in parsed file" {
         \\key_code = 70
         \\
     ;
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-shortcut-wins.toml", .data = doc });
-    defer std.Io.Dir.cwd().deleteFile(io, "cfg-shortcut-wins.toml") catch {};
-    const cfg = try parseFileConfig(gpa, io, "cfg-shortcut-wins.toml");
+    const path = "/tmp/zhisper-config-shortcut-wins-test.toml";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const cfg = try parseFileConfig(gpa, io, path);
     defer freeConfig(gpa, cfg);
     const hk = try resolveHotkeys(cfg.hotkey);
     try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("meta+8") }));

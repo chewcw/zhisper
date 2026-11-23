@@ -289,10 +289,6 @@ fn trimAsciiWhitespace(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t\r\n");
 }
 
-fn eqlIgnoreAsciiCase(a: []const u8, b: []const u8) bool {
-    return std.ascii.eqlIgnoreCase(a, b);
-}
-
 fn isUnsupportedModifier(token: []const u8) bool {
     var buf: [16]u8 = undefined;
     const n = @min(token.len, buf.len);
@@ -374,12 +370,12 @@ pub fn parse(text: []const u8) ParseError!Shortcut {
         }
 
         // Non-final position: must be a modifier.
-        if (eqlIgnoreAsciiCase(token, "meta")) {
+        if (std.ascii.eqlIgnoreCase(token, "meta")) {
             if (modifiers.meta) return error.DuplicateModifier;
             modifiers.meta = true;
             continue;
         }
-        if (eqlIgnoreAsciiCase(token, "shift")) {
+        if (std.ascii.eqlIgnoreCase(token, "shift")) {
             if (modifiers.shift) return error.DuplicateModifier;
             modifiers.shift = true;
             continue;
@@ -485,4 +481,10 @@ test "binding format marks legacy codes as codes" {
     const t = @import("shortcut.zig");
     var buf: [32]u8 = undefined;
     try std.testing.expectEqualStrings("code 9", try (t.Binding{ .raw_code = 9 }).format(&buf));
+}
+
+test "Shortcut.format returns error.NoSpaceLeft for a too-small buffer" {
+    const s = try parse("meta+f9");
+    var buf: [4]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, s.format(&buf));
 }
