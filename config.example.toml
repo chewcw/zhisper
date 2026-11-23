@@ -16,7 +16,7 @@ keyterm = ""      # deepgram: comma-separated terms to boost.
 # clipboard_key_code, search_key_code. An empty string falls back to the
 # default; use "off" to disable an action.
 [hotkey]
-shortcut = "meta+f9"   # meta = Super (Linux) / Win (Windows). Required. See "Shortcuts" in the README.
+shortcut = "f9"        # a bare f1-f24, or meta+<key> for any other key. See "Shortcuts" in the README.
 cancel = "meta+f8"     # discard the recording in progress; "off" disables it
 clipboard = "meta+f10" # record, then put the transcript on the clipboard; "off" disables it
 search = "off"         # record, then search for the transcript (see [search]); "off" disables it

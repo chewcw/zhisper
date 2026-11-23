@@ -119,7 +119,7 @@ options:
       --base-url=<str>           base URL (provider=custom only)
       --prompt=<str>             transcription prompt
       --language=<str>           language tag (deepgram; empty = auto)
-      --hotkey=<str>             record shortcut (default meta+f9)
+      --hotkey=<str>             record shortcut (default f9)
       --mode=<str>               hold | toggle
       --cancel=<str>             cancel shortcut (default meta+f8)
       --clipboard=<str>          clipboard shortcut (default meta+f10)
@@ -164,7 +164,7 @@ language = ""
 keyterm = ""
 
 [hotkey]
-shortcut = "meta+f9"   # hold to record; release to transcribe
+shortcut = "f9"        # hold to record; release to transcribe
 cancel = "meta+f8"     # discard the recording in progress
 clipboard = "meta+f10" # record, then put the transcript on the clipboard
 search = "off"         # record, then search for the transcript
@@ -218,9 +218,11 @@ Right-click the tray icon to change a setting. The selection is written to `conf
 
 ## Shortcuts
 
-A binding is `modifier+key`. `meta` is required, `shift` is optional. `meta` means Super on Linux, Win on Windows, Command on macOS.
+A binding is a bare function key, or `modifier+key`. A function key (`f1`–`f24`) may stand alone. Every other key needs `meta`, and `shift` is optional. `meta` means Super on Linux, Win on Windows, Command on macOS.
 
 `ctrl` and `alt` are rejected on purpose: holding them while the transcript is typed turns letters into control characters or menu accelerators. A config with `ctrl+8` fails at startup and says so.
+
+A bare function key cannot share its key with an old numeric setting for a different action: the listener would fire one and silently ignore the other, so that config fails at startup and tells you to give both actions shortcut strings.
 
 Key names are portable, so the same config works on Linux and Windows:
 
@@ -237,7 +239,7 @@ A chord fires only while every modifier is down, in any press order, and stops w
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `shortcut` | `meta+f9` | Press-and-hold to record; release to stop and transcribe |
+| `shortcut` | `f9` | Press-and-hold to record; release to stop and transcribe |
 | `cancel` | `meta+f8` | Discard the recording in progress |
 | `clipboard` | `meta+f10` | Record, then put the transcript on the clipboard instead of typing it |
 | `search` | `off` | Record, then search for the transcript |
@@ -245,9 +247,9 @@ A chord fires only while every modifier is down, in any press order, and stops w
 
 `""` keeps the default and `"off"` disables an action. With the clipboard on by default, an empty value cannot also mean off.
 
-Defaults changed: a config with no `[hotkey]` section now records on `meta+f9`, cancels on `meta+f8`, and puts the transcript on the clipboard on `meta+f10` instead of typing it. A recording started with `meta+f10` goes to the clipboard, not into the focused app. Search stays off.
+Defaults changed: a config with no `[hotkey]` section now records on `f9`, cancels on `meta+f8`, and puts the transcript on the clipboard on `meta+f10` instead of typing it. A recording started with `meta+f10` goes to the clipboard, not into the focused app. Search stays off.
 
-The defaults are the old bare keys with a `meta` chord on them, so an upgrade from `key_code = 67` keeps the same key, now with Super/Win.
+The record default is the old bare F9 with no modifier, so an upgrade from `key_code = 67` keeps exactly the same press. Cancel and clipboard gained a `meta` chord, so those keep the same key with Super/Win added.
 
 The old numeric settings (`key_code`, `cancel_key_code`, `clipboard_key_code`, `search_key_code`) still work with no modifier and log a deprecation line. A shortcut string wins over a number for the same action. Numeric codes remain accepted for old configs.
 
