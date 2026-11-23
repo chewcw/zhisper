@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("tray_types.zig");
 const config = @import("config.zig");
 const hotkey_types = @import("hotkey_types.zig");
+const shortcut = @import("shortcut.zig");
 
 pub const Submenu = types.Submenu;
 pub const Action = types.Action;
@@ -18,6 +19,7 @@ pub const Item = struct {
 pub const Row = union(enum) {
     separator,
     status: []const u8,
+    info: []const u8,
     item: Item,
 };
 
@@ -36,11 +38,23 @@ fn valueRow(arena: std.mem.Allocator, name: []const u8, value: []const u8, which
     } };
 }
 
+pub fn bindingRow(arena: std.mem.Allocator, name: []const u8, binding: shortcut.Binding) !Row {
+    var buf: [32]u8 = undefined;
+    const text = binding.format(&buf) catch |err| @errorName(err);
+    return .{ .info = try std.fmt.allocPrint(arena, "{s}: {s}", .{ name, text }) };
+}
+
 pub fn rootMenu(arena: std.mem.Allocator, state: types.State, cfg: config.Config) !Menu {
     var rows: std.ArrayListUnmanaged(Row) = .empty;
     try rows.append(arena, .{ .status = types.tooltip(state) });
     try rows.append(arena, .separator);
     try rows.append(arena, try valueRow(arena, "Hotkey mode", cfg.hotkey.mode, .hotkey_mode));
+    if (config.resolveHotkeys(cfg.hotkey) catch null) |hotkeys| {
+        try rows.append(arena, try bindingRow(arena, "Record", hotkeys.shortcut));
+        try rows.append(arena, try bindingRow(arena, "Cancel", hotkeys.cancel));
+        if (hotkeys.clipboard) |b| try rows.append(arena, try bindingRow(arena, "Clipboard", b));
+        if (hotkeys.search) |b| try rows.append(arena, try bindingRow(arena, "Search", b));
+    }
     try rows.append(arena, try valueRow(arena, "Normalize", if (cfg.normalize.enabled) "on" else "off", .normalize));
     try rows.append(arena, try valueRow(arena, "Styling", cfg.normalize.styling, .styling));
     try rows.append(arena, try valueRow(arena, "Structure", cfg.normalize.structure, .structure));
@@ -61,6 +75,7 @@ pub fn width(menu: Menu, advance: i32) i32 {
     for (menu.rows) |row| switch (row) {
         .item => |item| longest = @max(longest, item.label.len),
         .status => |text| longest = @max(longest, text.len),
+        .info => |text| longest = @max(longest, text.len),
         .separator => {},
     };
     // Two columns of glyphs next to the label: the check mark and the submenu
@@ -210,8 +225,14 @@ test "root menu shows the current value of every row" {
     cfg.daemon.overlay = false;
     const menu = try testMenu(arena_state.allocator(), cfg);
 
+    try std.testing.expectEqualStrings("Hotkey mode: toggle", itemAt(menu, 2).label);
+    try std.testing.expect(itemAt(menu, 2).opens_submenu);
+    // Default bindings: record, cancel, clipboard are on; search is off.
+    try std.testing.expect(menu.rows[3] == .info);
+    try std.testing.expect(menu.rows[4] == .info);
+    try std.testing.expect(menu.rows[5] == .info);
+
     const labels = [_][]const u8{
-        "Hotkey mode: toggle",
         "Normalize: on",
         "Styling: formal",
         "Structure: lists",
@@ -220,8 +241,9 @@ test "root menu shows the current value of every row" {
         "Overlay: off",
     };
     for (labels, 0..) |want, i| {
-        try std.testing.expectEqualStrings(want, itemAt(menu, i + 2).label);
-        try std.testing.expect(itemAt(menu, i + 2).opens_submenu);
+        const idx = i + 6;
+        try std.testing.expectEqualStrings(want, itemAt(menu, idx).label);
+        try std.testing.expect(itemAt(menu, idx).opens_submenu);
     }
 }
 
@@ -359,4 +381,58 @@ test "placeMenu keeps a left-half icon left-aligned even when the menu is wide" 
 test "placeMenu still clamps a wide menu from a left-half icon" {
     const anchor = Rect{ .x = 700, .y = 1050, .w = 22, .h = 22 };
     try std.testing.expectEqual(Position{ .x = 620, .y = 850 }, placeMenu(anchor, 1300, 200, 1920, 1080));
+}
+
+test "root menu lists the record, cancel and clipboard shortcuts as read-only rows" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const menu = try testMenu(arena_state.allocator(), config.defaultConfig());
+
+    const labels = [_][]const u8{ "Record: Meta+F9", "Cancel: Meta+F8", "Clipboard: Meta+F10" };
+    for (labels, 0..) |want, i| {
+        const row = menu.rows[i + 3];
+        try std.testing.expect(row == .info);
+        try std.testing.expectEqualStrings(want, row.info);
+    }
+}
+
+test "a disabled binding gets no row" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    // Search is off by default; a row for it would suggest a key that does nothing.
+    const menu = try testMenu(arena_state.allocator(), config.defaultConfig());
+    for (menu.rows) |row| switch (row) {
+        .info => |text| try std.testing.expect(std.mem.indexOf(u8, text, "Search") == null),
+        else => {},
+    };
+}
+
+test "a configured clipboard shortcut gets its own row" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var cfg = config.defaultConfig();
+    cfg.hotkey.clipboard = "meta+shift+1";
+    const menu = try testMenu(arena_state.allocator(), cfg);
+    var found = false;
+    for (menu.rows) |row| switch (row) {
+        .info => |text| if (std.mem.eql(u8, text, "Clipboard: Meta+Shift+1")) {
+            found = true;
+        },
+        else => {},
+    };
+    try std.testing.expect(found);
+}
+
+test "a legacy integer binding still shows a row" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    // defaultConfig carries the string default, so swap in a legacy config to
+    // prove the row is built from resolved bindings, not from raw strings.
+    var legacy = config.defaultConfig();
+    legacy.hotkey.shortcut = "";
+    legacy.hotkey.key_code = 67;
+    legacy.hotkey.cancel = "";
+    legacy.hotkey.cancel_key_code = 46;
+    const legacy_menu = try testMenu(arena_state.allocator(), legacy);
+    try std.testing.expectEqualStrings("Record: code 67", legacy_menu.rows[3].info);
 }

@@ -419,6 +419,10 @@ fn paint(d: *c.Display, menu_state: *MenuState) void {
                 _ = c.XSetForeground(d, menu_gc, menu_dim);
                 _ = c.XDrawString(d, menu_window, menu_gc, 2 * tray_menu.pad_x, y + 15, text.ptr, @intCast(text.len));
             },
+            .info => |text| {
+                _ = c.XSetForeground(d, menu_gc, menu_dim);
+                _ = c.XDrawString(d, menu_window, menu_gc, 2 * tray_menu.pad_x, y + 15, text.ptr, @intCast(text.len));
+            },
             .item => |item| {
                 if (item.enabled and menu_state.hover == i) {
                     _ = c.XSetForeground(d, menu_gc, menu_hover);
