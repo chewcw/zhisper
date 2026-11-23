@@ -206,16 +206,15 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
             if (modifierBitForVk(vk)) |bit| {
                 setModifierVk(vk, is_down);
                 if (is_down) {
-                    var cancel_fire = false;
                     if (cancel_key_down) {
                         if (cancelChord()) |ch| {
                             if (!cancel_emitted and chordModifiersSatisfied(ch)) {
                                 cancel_emitted = true;
-                                cancel_fire = true;
+                                ring.push(.cancel_pressed);
+                                return c.CallNextHookEx(null, code, wparam, lparam);
                             }
                         }
                     }
-                    var chord_fire: ?Latched = null;
                     if (latched == null) {
                         const candidates = [_]Latched{ .shortcut, .clipboard, .search };
                         for (candidates) |kind| {
@@ -223,12 +222,10 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                             const ch = chordOf(bindingForLatched(kind)) orelse continue;
                             if (!chordModifiersSatisfied(ch)) continue;
                             latched = kind;
-                            chord_fire = kind;
+                            ring.push(pressedEvent(kind));
                             break;
                         }
                     }
-                    if (cancel_fire) ring.push(.cancel_pressed);
-                    if (chord_fire) |kind| ring.push(pressedEvent(kind));
                 } else {
                     if (cancel_key_down and cancelChordRequiresModifier(bit)) {
                         cancel_emitted = false;

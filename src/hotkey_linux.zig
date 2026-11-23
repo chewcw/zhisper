@@ -43,7 +43,6 @@ var chord_key_down = [_]bool{ false, false, false };
 // of a required modifier while the cancel key is still held.
 var cancel_key_down = false;
 var cancel_emitted = false;
-var pending_event: ?KeyEvent = null;
 
 fn bindingForLatched(kind: Latched) shortcut.Binding {
     return switch (kind) {
@@ -327,10 +326,6 @@ pub fn pollEvent() ?KeyEvent {
     var ev: c.struct_input_event = undefined;
     const bytes = std.mem.asBytes(&ev);
     outer: while (true) {
-        if (pending_event) |pe| {
-            pending_event = null;
-            return pe;
-        }
         const n = std.os.linux.read(fd_evdev, bytes.ptr, bytes.len);
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
@@ -340,16 +335,14 @@ pub fn pollEvent() ?KeyEvent {
         if (modifierBit(@intCast(ev.code))) |bit| {
             if (ev.value == 1) {
                 _ = held.fetchOr(bit, .acq_rel);
-                var cancel_fire = false;
                 if (cancel_key_down) {
                     if (cancelChord()) |ch| {
                         if (!cancel_emitted and chordModifiersSatisfied(ch)) {
                             cancel_emitted = true;
-                            cancel_fire = true;
+                            return .cancel_pressed;
                         }
                     }
                 }
-                var chord_fire: ?Latched = null;
                 if (latched == null) {
                     const candidates = [_]Latched{ .shortcut, .clipboard, .search };
                     for (candidates) |kind| {
@@ -357,16 +350,9 @@ pub fn pollEvent() ?KeyEvent {
                         const ch = chordOf(bindingForLatched(kind)) orelse continue;
                         if (!chordModifiersSatisfied(ch)) continue;
                         latched = kind;
-                        chord_fire = kind;
-                        break;
+                        return pressedEvent(kind);
                     }
                 }
-                if (cancel_fire and chord_fire != null) {
-                    pending_event = pressedEvent(chord_fire.?);
-                    return .cancel_pressed;
-                }
-                if (cancel_fire) return .cancel_pressed;
-                if (chord_fire) |kind| return pressedEvent(kind);
             } else if (ev.value == 0) {
                 _ = held.fetchAnd(~bit, .acq_rel);
                 if (cancel_key_down and cancelChordRequiresModifier(bit)) {
@@ -483,7 +469,6 @@ pub fn destroy() void {
     chord_key_down = [_]bool{ false, false, false };
     cancel_key_down = false;
     cancel_emitted = false;
-    pending_event = null;
 }
 
 fn setFdForTest(fd: posix.fd_t, config: HotkeyConfig) void {
@@ -496,7 +481,6 @@ fn setFdForTest(fd: posix.fd_t, config: HotkeyConfig) void {
     chord_key_down = [_]bool{ false, false, false };
     cancel_key_down = false;
     cancel_emitted = false;
-    pending_event = null;
 }
 
 fn writeTestEvent(fd: posix.fd_t, ev_type: u16, code: u16, value: i32) !void {
@@ -928,4 +912,23 @@ test "a chord cancel re-arms when a required modifier is released while key is h
     try std.testing.expect(pollEvent() == null);
     try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1);
     try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+}
+
+test "a chord cancel preempts another chord ready on the same modifier press" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+9") },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, 10, 1); // KEY_9 down
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1); // F8 down
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1); // meta makes both ready
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+    try std.testing.expect(pollEvent() == null);
 }
