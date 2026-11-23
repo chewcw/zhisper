@@ -50,6 +50,11 @@ var rshift_down = false;
 var generic_shift_down = false;
 var latched: ?Latched = null;
 var chord_key_down = [_]bool{ false, false, false };
+// Cancel is press-only and has no release event, so it cannot share the
+// Latched slot. Its own state re-arms on cancel-key release or on release
+// of a required modifier while the cancel key is still held.
+var cancel_key_down = false;
+var cancel_emitted = false;
 var held: std.atomic.Value(u16) = .init(0);
 var hook: c.HHOOK = null;
 var thread: ?std.Thread = null;
@@ -145,6 +150,15 @@ fn latchedRequiresModifier(kind: Latched, bit: u16) bool {
     return chordRequiresModifier(ch, bit);
 }
 
+fn cancelChord() ?shortcut.Shortcut {
+    return chordOf(cfg.cancel);
+}
+
+fn cancelChordRequiresModifier(bit: u16) bool {
+    const ch = cancelChord() orelse return false;
+    return chordRequiresModifier(ch, bit);
+}
+
 fn publishHeld() void {
     var bits: u16 = 0;
     if (lmeta_down or rmeta_down) bits |= meta_bit;
@@ -192,6 +206,16 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
             if (modifierBitForVk(vk)) |bit| {
                 setModifierVk(vk, is_down);
                 if (is_down) {
+                    var cancel_fire = false;
+                    if (cancel_key_down) {
+                        if (cancelChord()) |ch| {
+                            if (!cancel_emitted and chordModifiersSatisfied(ch)) {
+                                cancel_emitted = true;
+                                cancel_fire = true;
+                            }
+                        }
+                    }
+                    var chord_fire: ?Latched = null;
                     if (latched == null) {
                         const candidates = [_]Latched{ .shortcut, .clipboard, .search };
                         for (candidates) |kind| {
@@ -199,11 +223,16 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                             const ch = chordOf(bindingForLatched(kind)) orelse continue;
                             if (!chordModifiersSatisfied(ch)) continue;
                             latched = kind;
-                            ring.push(pressedEvent(kind));
+                            chord_fire = kind;
                             break;
                         }
                     }
+                    if (cancel_fire) ring.push(.cancel_pressed);
+                    if (chord_fire) |kind| ring.push(pressedEvent(kind));
                 } else {
+                    if (cancel_key_down and cancelChordRequiresModifier(bit)) {
+                        cancel_emitted = false;
+                    }
                     if (latched) |kind| {
                         if (latchedRequiresModifier(kind, bit)) {
                             latched = null;
@@ -212,6 +241,28 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                     }
                 }
                 return c.CallNextHookEx(null, code, wparam, lparam);
+            }
+
+            // Cancel chord: press-only, fires even while another binding is latched.
+            if (cancelChord()) |ch| {
+                if (nativeCode(ch.key)) |key_code| {
+                    if (vk == key_code) {
+                        if (is_down) {
+                            if (!cancel_key_down) {
+                                cancel_key_down = true;
+                                if (!cancel_emitted and chordModifiersSatisfied(ch)) {
+                                    cancel_emitted = true;
+                                    ring.push(.cancel_pressed);
+                                }
+                            }
+                            // held key streams key-down callbacks; never re-emit.
+                        } else if (cancel_key_down) {
+                            cancel_key_down = false;
+                            cancel_emitted = false;
+                        }
+                        return c.CallNextHookEx(null, code, wparam, lparam);
+                    }
+                }
             }
 
             const candidates = [_]Latched{ .shortcut, .clipboard, .search };
@@ -331,6 +382,8 @@ pub fn setup(config: types.HotkeyConfig) !void {
     generic_shift_down = false;
     latched = null;
     chord_key_down = [_]bool{ false, false, false };
+    cancel_key_down = false;
+    cancel_emitted = false;
     held.store(0, .release);
     status.store(status_pending, .release);
     thread_id.store(0, .release);
@@ -376,5 +429,7 @@ pub fn destroy() void {
     generic_shift_down = false;
     latched = null;
     chord_key_down = [_]bool{ false, false, false };
+    cancel_key_down = false;
+    cancel_emitted = false;
     held.store(0, .release);
 }
