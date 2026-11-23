@@ -1,4 +1,5 @@
 const std = @import("std");
+const shortcut = @import("shortcut.zig");
 
 /// Single vocabulary for both directions: the hotkey listener reports a
 /// KeyEvent, the typer consumes one. Pure Zig, no OS headers — safe on all
@@ -9,11 +10,25 @@ const std = @import("std");
 /// fixed-size tag type.
 pub const KeyEvent = enum(u8) { hotkey_pressed, hotkey_released, cancel_pressed, clipboard_pressed, clipboard_released, search_pressed, search_released };
 pub const Mode = enum { hold, toggle };
-// WHY clipboard_key_code defaults to 0: evdev key 0 is KEY_RESERVED and is
-// never emitted, so 0 is a real disable rather than a real binding. macOS
-// key code 0 is a genuine key (kVK_ANSI_A), which main.zig resolves the same
-// way it already resolves cancel_key_code.
-pub const HotkeyConfig = struct { key_code: u16, mode: Mode = .hold, evdev: []const u8 = "", evdev_name: []const u8 = "", cancel_key_code: u16 = 46, clipboard_key_code: u16 = 0, search_key_code: u16 = 0 };
+
+pub const HotkeyConfig = struct {
+    shortcut: shortcut.Binding,
+    cancel: shortcut.Binding,
+    clipboard: ?shortcut.Binding = null,
+    search: ?shortcut.Binding = null,
+    mode: Mode = .hold,
+    evdev: []const u8 = "",
+    evdev_name: []const u8 = "",
+};
+
+/// Native code for a legacy binding. Returns null for a chord or for the
+/// 0-means-disabled placeholder so listeners can keep their existing guards.
+pub fn rawCode(b: shortcut.Binding) ?u16 {
+    return switch (b) {
+        .chord => null,
+        .raw_code => |code| if (code == 0) null else code,
+    };
+}
 
 /// Fixed-capacity single-producer / single-consumer queue of hotkey events.
 ///
@@ -72,15 +87,24 @@ pub const EventRing = struct {
 };
 
 test "default mode is hold" {
-    const cfg = HotkeyConfig{ .key_code = 16 };
+    const cfg = HotkeyConfig{ .shortcut = .{ .raw_code = 16 }, .cancel = .{ .raw_code = 46 } };
     try std.testing.expectEqual(Mode.hold, cfg.mode);
 }
 
-test "cancel key defaults to KEY_C and is disableable with 0" {
-    const cfg = HotkeyConfig{ .key_code = 16 };
-    try std.testing.expectEqual(@as(u16, 46), cfg.cancel_key_code);
-    const off = HotkeyConfig{ .key_code = 16, .cancel_key_code = 0 };
-    try std.testing.expectEqual(@as(u16, 0), off.cancel_key_code);
+test "clipboard and search bindings default to null, which never fires" {
+    const t = @import("hotkey_types.zig");
+    const cfg: t.HotkeyConfig = .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 } };
+    try std.testing.expect(cfg.clipboard == null);
+    try std.testing.expect(cfg.search == null);
+}
+
+test "rawCode reads legacy codes and refuses chords" {
+    const t = @import("hotkey_types.zig");
+    const sc = @import("shortcut.zig");
+    try std.testing.expectEqual(@as(?u16, 30), t.rawCode(.{ .raw_code = 30 }));
+    // 0 is the "never fires" placeholder used by an unset module-level config.
+    try std.testing.expect(t.rawCode(.{ .raw_code = 0 }) == null);
+    try std.testing.expect(t.rawCode(.{ .chord = try sc.parse("meta+8") }) == null);
 }
 
 test "EventRing preserves push order" {
@@ -124,16 +148,6 @@ test "EventRing reset empties it" {
     ring.push(.hotkey_pressed);
     ring.reset();
     try std.testing.expect(ring.pop() == null);
-}
-
-test "clipboard key code defaults to 0, which never fires" {
-    const cfg = HotkeyConfig{ .key_code = 16 };
-    try std.testing.expectEqual(@as(u16, 0), cfg.clipboard_key_code);
-}
-
-test "search key code defaults to 0, which never fires" {
-    const cfg: HotkeyConfig = .{ .key_code = 30 };
-    try std.testing.expectEqual(@as(u16, 0), cfg.search_key_code);
 }
 
 test "EventRing preserves search event order" {

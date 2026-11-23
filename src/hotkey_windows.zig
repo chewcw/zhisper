@@ -19,7 +19,7 @@ const status_ok: u8 = 1;
 const status_failed: u8 = 2;
 
 var ring: types.EventRing = types.EventRing.init();
-var cfg: types.HotkeyConfig = .{ .key_code = 0 };
+var cfg: types.HotkeyConfig = .{ .shortcut = .{ .raw_code = 0 }, .cancel = .{ .raw_code = 0 } };
 /// Written only by the hook thread, which is also the only thread the hook
 /// callback runs on, so plain bools are correct here.
 var hotkey_down = false;
@@ -45,7 +45,12 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
             // KBDLLHOOKSTRUCT has no repeat flag, so a held key streams key-down
             // callbacks. Report each transition once. (hotkey_linux.zig skips
             // value == 2 for the same reason.)
-            if (vk == cfg.key_code) {
+            const hotkey_code = types.rawCode(cfg.shortcut);
+            const cancel_code = types.rawCode(cfg.cancel);
+            const clipboard_code: ?u16 = if (cfg.clipboard) |b| types.rawCode(b) else null;
+            const search_code: ?u16 = if (cfg.search) |b| types.rawCode(b) else null;
+
+            if (hotkey_code != null and vk == hotkey_code.?) {
                 if (is_down) {
                     if (!hotkey_down) {
                         hotkey_down = true;
@@ -55,7 +60,7 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                     hotkey_down = false;
                     ring.push(.hotkey_released);
                 }
-            } else if (vk == cfg.clipboard_key_code) {
+            } else if (clipboard_code != null and vk == clipboard_code.?) {
                 // Same reason hotkey_down and cancel_down exist:
                 // KBDLLHOOKSTRUCT has no repeat flag, so a held key streams
                 // key-down callbacks and each transition must be reported once.
@@ -68,7 +73,7 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                     clipboard_down = false;
                     ring.push(.clipboard_released);
                 }
-            } else if (vk == cfg.search_key_code) {
+            } else if (search_code != null and vk == search_code.?) {
                 // Same transition-once logic as hotkey/clipboard/cancel:
                 // KBDLLHOOKSTRUCT has no repeat flag.
                 if (is_down) {
@@ -80,7 +85,7 @@ fn lowLevelKeyboardProc(code: c_int, wparam: c.WPARAM, lparam: c.LPARAM) callcon
                     search_down = false;
                     ring.push(.search_released);
                 }
-            } else if (vk == cfg.cancel_key_code) {
+            } else if (cancel_code != null and vk == cancel_code.?) {
                 if (is_down) {
                     if (!cancel_down) {
                         cancel_down = true;
@@ -143,6 +148,10 @@ pub fn setup(config: types.HotkeyConfig) !void {
 
 pub fn pollEvent() ?types.KeyEvent {
     return ring.pop();
+}
+
+pub fn modifiersHeld() bool {
+    return false;
 }
 
 pub fn destroy() void {

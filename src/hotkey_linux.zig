@@ -13,7 +13,7 @@ const c = @cImport({
 });
 
 var fd_evdev: posix.fd_t = -1;
-var active_cfg: HotkeyConfig = .{ .key_code = 0 };
+var active_cfg: HotkeyConfig = .{ .shortcut = .{ .raw_code = 0 }, .cancel = .{ .raw_code = 0 } };
 
 fn closeFd(fd: posix.fd_t) void {
     _ = std.os.linux.close(fd);
@@ -114,7 +114,7 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("using explicit evdev {s} (key={d}, cancel={d})", .{ path, config.key_code, config.cancel_key_code });
+            log.info("using explicit evdev {s} (key={d}, cancel={d})", .{ path, types.rawCode(config.shortcut) orelse 0, types.rawCode(config.cancel) orelse 0 });
             return;
         }
         return error.DeviceNotFound;
@@ -134,7 +134,7 @@ pub fn setup(config: HotkeyConfig) !void {
             if (try openPath(path)) |fd| {
                 fd_evdev = fd;
                 active_cfg = config;
-                log.info("name match '{s}' -> {s} (key={d}, cancel={d})", .{ want, path, config.key_code, config.cancel_key_code });
+                log.info("name match '{s}' -> {s} (key={d}, cancel={d})", .{ want, path, types.rawCode(config.shortcut) orelse 0, types.rawCode(config.cancel) orelse 0 });
                 return;
             }
         }
@@ -153,7 +153,7 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("auto-scan picked {s} (key={d}, cancel={d})", .{ path, config.key_code, config.cancel_key_code });
+            log.info("auto-scan picked {s} (key={d}, cancel={d})", .{ path, types.rawCode(config.shortcut) orelse 0, types.rawCode(config.cancel) orelse 0 });
             return;
         }
     }
@@ -172,28 +172,44 @@ pub fn pollEvent() ?KeyEvent {
         const n = std.os.linux.read(fd_evdev, bytes.ptr, bytes.len);
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
-        // log.debug("ev code={d} value={d} (want talk={d} clipboard={d} cancel={d})", .{ ev.code, ev.value, active_cfg.key_code, active_cfg.clipboard_key_code, active_cfg.cancel_key_code });
+        // log.debug("ev code={d} value={d} (want talk={d} clipboard={?d} cancel={d} search={?d})", .{ ev.code, ev.value, types.rawCode(active_cfg.shortcut) orelse 0, if (active_cfg.clipboard) |b| types.rawCode(b) else null, types.rawCode(active_cfg.cancel) orelse 0, if (active_cfg.search) |b| types.rawCode(b) else null });
         // Hotkey first so a misconfigured cancel == hotkey degrades to hotkey.
-        if (ev.code == active_cfg.key_code) {
-            if (ev.value == 1) return .hotkey_pressed;
-            if (ev.value == 0) return .hotkey_released;
-            continue; // value == 2 is auto-repeat: ignore.
+        if (types.rawCode(active_cfg.shortcut)) |hk| {
+            if (ev.code == hk) {
+                if (ev.value == 1) return .hotkey_pressed;
+                if (ev.value == 0) return .hotkey_released;
+                continue; // value == 2 is auto-repeat: ignore.
+            }
         }
-        if (active_cfg.clipboard_key_code != 0 and ev.code == active_cfg.clipboard_key_code) {
-            if (ev.value == 1) return .clipboard_pressed;
-            if (ev.value == 0) return .clipboard_released;
-            continue; // value == 2 is auto-repeat: ignore.
+        if (active_cfg.clipboard) |b| {
+            if (types.rawCode(b)) |code| {
+                if (ev.code == code) {
+                    if (ev.value == 1) return .clipboard_pressed;
+                    if (ev.value == 0) return .clipboard_released;
+                    continue; // value == 2 is auto-repeat: ignore.
+                }
+            }
         }
-        if (active_cfg.cancel_key_code != 0 and ev.code == active_cfg.cancel_key_code) {
-            if (ev.value == 1) return .cancel_pressed;
-            continue; // cancel release + autorepeat swallowed.
+        if (types.rawCode(active_cfg.cancel)) |code| {
+            if (ev.code == code) {
+                if (ev.value == 1) return .cancel_pressed;
+                continue; // cancel release + autorepeat swallowed.
+            }
         }
-        if (active_cfg.search_key_code != 0 and ev.code == active_cfg.search_key_code) {
-            if (ev.value == 1) return .search_pressed;
-            if (ev.value == 0) return .search_released;
-            continue; // value == 2 is auto-repeat: ignore.
+        if (active_cfg.search) |b| {
+            if (types.rawCode(b)) |code| {
+                if (ev.code == code) {
+                    if (ev.value == 1) return .search_pressed;
+                    if (ev.value == 0) return .search_released;
+                    continue; // value == 2 is auto-repeat: ignore.
+                }
+            }
         }
     }
+}
+
+pub fn modifiersHeld() bool {
+    return false;
 }
 
 pub fn destroy() void {
@@ -241,7 +257,7 @@ test "pollEvent decodes press, skips repeat, decodes release" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 31, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 30, 2);
     try writeTestEvent(fds[1], c.EV_KEY, 30, 1);
@@ -264,7 +280,7 @@ test "pollEvent decodes cancel press, swallows cancel release and repeat" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .cancel_key_code = 46 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .mode = .hold });
     // unrelated code skipped
     try writeTestEvent(fds[1], c.EV_KEY, 31, 1);
     // cancel autorepeat swallowed
@@ -290,7 +306,7 @@ test "cancel disabled with 0 never fires" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .cancel_key_code = 0 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 0 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 46, 1);
     try std.testing.expect(pollEvent() == null);
 }
@@ -340,7 +356,7 @@ test "pollEvent decodes clipboard press and release" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 87 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .clipboard = .{ .raw_code = 87 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 87, 1);
     try std.testing.expectEqual(KeyEvent.clipboard_pressed, pollEvent().?);
     try writeTestEvent(fds[1], c.EV_KEY, 87, 0);
@@ -361,7 +377,7 @@ test "pollEvent swallows clipboard autorepeat" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 87 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .clipboard = .{ .raw_code = 87 }, .mode = .hold });
     // value 2 is auto-repeat: a held key must not re-report presses.
     try writeTestEvent(fds[1], c.EV_KEY, 87, 2);
     try std.testing.expect(pollEvent() == null);
@@ -380,7 +396,7 @@ test "a clipboard key of 0 never fires" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 0 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .clipboard = null, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 87, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 87, 0);
     try std.testing.expect(pollEvent() == null);
@@ -399,7 +415,7 @@ test "pollEvent decodes search press and release" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .search_key_code = 65 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .search = .{ .raw_code = 65 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 65, 1);
     try std.testing.expectEqual(KeyEvent.search_pressed, pollEvent().?);
     try writeTestEvent(fds[1], c.EV_KEY, 65, 2);
@@ -422,7 +438,7 @@ test "search key of 0 never fires" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .search_key_code = 0 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .search = null, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 65, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 65, 0);
     try std.testing.expect(pollEvent() == null);

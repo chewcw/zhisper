@@ -23,6 +23,10 @@ pub fn pollEvent() ?KeyEvent {
     return impl.pollEvent();
 }
 
+pub fn modifiersHeld() bool {
+    return impl.modifiersHeld();
+}
+
 pub fn destroy() void {
     return impl.destroy();
 }
@@ -31,7 +35,7 @@ test "facade replays stub events in order" {
     const stub = @import("hotkey_stub.zig");
     stub.reset();
     defer stub.reset();
-    try setup(.{ .key_code = 30, .mode = .hold });
+    try setup(.{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .mode = .hold });
     stub.pushTestEvent(.hotkey_pressed);
     stub.pushTestEvent(.hotkey_released);
     stub.pushTestEvent(.cancel_pressed);
@@ -46,11 +50,23 @@ test "facade replays stub search events in order" {
     const stub = @import("hotkey_stub.zig");
     stub.reset();
     defer stub.reset();
-    try setup(.{ .key_code = 30, .mode = .hold, .search_key_code = 65 });
+    try setup(.{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .search = .{ .raw_code = 65 }, .mode = .hold });
     stub.pushTestEvent(.search_pressed);
     stub.pushTestEvent(.search_released);
     try std.testing.expectEqual(KeyEvent.search_pressed, pollEvent().?);
     try std.testing.expectEqual(KeyEvent.search_released, pollEvent().?);
     try std.testing.expect(pollEvent() == null);
+    destroy();
+}
+
+test "facade reports the modifier state the stub holds" {
+    const stub = @import("hotkey_stub.zig");
+    stub.reset();
+    defer stub.reset();
+    try setup(.{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 } });
+    stub.setModifiersHeldForTest(true);
+    try std.testing.expect(modifiersHeld());
+    stub.setModifiersHeldForTest(false);
+    try std.testing.expect(!modifiersHeld());
     destroy();
 }

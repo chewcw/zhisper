@@ -741,14 +741,15 @@ pub fn main(init: std.process.Init) !void {
         }
         break :blk code;
     } else 0;
+    const search_code: u16 = zhisper.config.keyCodeOf(cfg.hotkey.search_key_code) orelse 0;
     zhisper.hotkey.setup(.{
-        .key_code = hotkey_code,
+        .shortcut = .{ .raw_code = hotkey_code },
+        .cancel = .{ .raw_code = zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0 },
+        .clipboard = if (clipboard_code == 0) null else .{ .raw_code = clipboard_code },
+        .search = if (search_code == 0) null else .{ .raw_code = search_code },
         .mode = mode,
         .evdev = cfg.hotkey.evdev,
         .evdev_name = cfg.hotkey.evdev_name,
-        .cancel_key_code = zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
-        .clipboard_key_code = clipboard_code,
-        .search_key_code = zhisper.config.keyCodeOf(cfg.hotkey.search_key_code) orelse 0,
     }) catch |err| {
         std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);

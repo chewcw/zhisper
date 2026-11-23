@@ -4,6 +4,7 @@ const types = @import("hotkey_types.zig");
 var queue: [16]types.KeyEvent = undefined;
 var queue_len: usize = 0;
 var queue_pos: usize = 0;
+var held = false;
 
 pub fn pushTestEvent(ev: types.KeyEvent) void {
     std.debug.assert(queue_len < queue.len);
@@ -11,9 +12,18 @@ pub fn pushTestEvent(ev: types.KeyEvent) void {
     queue_len += 1;
 }
 
+pub fn setModifiersHeldForTest(v: bool) void {
+    held = v;
+}
+
+pub fn modifiersHeld() bool {
+    return held;
+}
+
 pub fn reset() void {
     queue_len = 0;
     queue_pos = 0;
+    held = false;
 }
 
 pub fn setup(_: types.HotkeyConfig) !void {
@@ -41,4 +51,14 @@ test "stub replays hotkey press, release, and cancel then null" {
     try std.testing.expectEqual(types.KeyEvent.hotkey_released, pollEvent().?);
     try std.testing.expectEqual(types.KeyEvent.cancel_pressed, pollEvent().?);
     try std.testing.expect(pollEvent() == null);
+}
+
+test "stub reports modifiers released by default" {
+    const types_mod = @import("hotkey_types.zig");
+    reset();
+    defer reset();
+    try std.testing.expect(!modifiersHeld());
+    setModifiersHeldForTest(true);
+    try std.testing.expect(modifiersHeld());
+    _ = types_mod;
 }
