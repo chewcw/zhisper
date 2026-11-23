@@ -33,10 +33,10 @@ pub const default_search = "off";
 pub const off_token = "off";
 
 pub const HotkeyCfg = struct {
-    shortcut: []const u8 = default_shortcut,
-    cancel: []const u8 = default_cancel,
-    clipboard: []const u8 = default_clipboard,
-    search: []const u8 = default_search,
+    shortcut: []const u8 = "",
+    cancel: []const u8 = "",
+    clipboard: []const u8 = "",
+    search: []const u8 = "",
     mode: []const u8 = "hold",
     evdev: []const u8 = "",
     evdev_name: []const u8 = "",
@@ -1187,4 +1187,54 @@ test "every string setting survives dupe and free" {
     try std.testing.expectEqualStrings("meta+9", owned.hotkey.search);
     try std.testing.expectEqualStrings("meta+f9", owned.hotkey.shortcut);
     try std.testing.expectEqualStrings("meta+f8", owned.hotkey.cancel);
+}
+
+test "legacy-only file key_code resolves to raw code and keeps default clipboard chord" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\key_code = 70
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-legacy-only.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-legacy-only.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-legacy-only.toml");
+    defer freeConfig(gpa, cfg);
+    const hk = try resolveHotkeys(cfg.hotkey);
+    try std.testing.expect(hk.shortcut.eql(.{ .raw_code = 70 }));
+    try std.testing.expect(hk.clipboard.?.eql(.{ .chord = try shortcut.parse("meta+f10") }));
+}
+
+test "legacy-only file clipboard_key_code -1 leaves clipboard action null" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\clipboard_key_code = -1
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-legacy-clip-off.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-legacy-clip-off.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-legacy-clip-off.toml");
+    defer freeConfig(gpa, cfg);
+    const hk = try resolveHotkeys(cfg.hotkey);
+    try std.testing.expect(hk.clipboard == null);
+}
+
+test "shortcut string wins over legacy key_code in parsed file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\shortcut = "meta+8"
+        \\key_code = 70
+        \\
+    ;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-shortcut-wins.toml", .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, "cfg-shortcut-wins.toml") catch {};
+    const cfg = try parseFileConfig(gpa, io, "cfg-shortcut-wins.toml");
+    defer freeConfig(gpa, cfg);
+    const hk = try resolveHotkeys(cfg.hotkey);
+    try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("meta+8") }));
 }
