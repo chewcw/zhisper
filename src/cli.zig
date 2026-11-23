@@ -18,12 +18,12 @@ const help_text =
     \\.      --model=<str>  model (empty = preset)
     \\.      --base-url=<str>  base URL (provider=custom only)
     \\.      --language=<str>  language tag (deepgram; empty = auto)
-    \\.      --hotkey=<str>  h
-    \\.      --cancel=<str>  c
-    \\.      --clipboard=<str>  p
-    \\.      --search=<str>  s
-    \\.      --key-code=<uint>  dep
-    \\.      --cancel-key-code=<uint>  dep
+    \\.      --hotkey=<str>  f9
+    \\.      --cancel=<str>  f8
+    \\.      --clipboard=<str>  f10
+    \\.      --search=<str>  off
+    \\.      --key-code=<uint>  old
+    \\.      --cancel-key-code=<uint>  old
     \\.      --mode=<str>  hold | toggle
     \\.      --evdev=<str>  Linux evdev path/name:DEV
     \\.      --device=<str>  mic (empty = default)
