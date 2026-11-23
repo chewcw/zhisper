@@ -7,7 +7,7 @@ Press a key, talk, let go. Your words land as text in whatever window you were t
 - Hold a key to talk, release to transcribe and type.
 - A second key throws the current recording away.
 - A third can route a recording to the clipboard instead of typing it.
-- Which keys those are is up to you — see [Key codes](#key-codes). There are working defaults if you would rather not pick.
+- Which keys those are is up to you — see [Shortcuts](#shortcuts). There are working defaults if you would rather not pick.
 - Runs on **Linux, Windows, and macOS** from the same source.
 
 ## Table of contents
@@ -17,7 +17,7 @@ Press a key, talk, let go. Your words land as text in whatever window you were t
 - [Setup](#setup)
 - [Usage](#usage)
 - [Configuration](#configuration)
-- [Key codes](#key-codes)
+- [Shortcuts](#shortcuts)
 - [Environment variables](#environment-variables)
 - [Optional text normalization](#optional-text-normalization)
 - [Development](#development)
@@ -119,9 +119,12 @@ options:
       --base-url=<str>           base URL (provider=custom only)
       --prompt=<str>             transcription prompt
       --language=<str>           language tag (deepgram; empty = auto)
-      --key-code=<uint>          hotkey code (default 67=F9)
+      --hotkey=<str>             record shortcut (default f9)
       --mode=<str>               hold | toggle
-      --cancel-key-code=<uint>   cancel key (46=C)
+      --cancel=<str>             cancel shortcut (default meta+f8)
+      --clipboard=<str>          clipboard shortcut (default meta+f10)
+      --search=<str>             search shortcut (default off)
+      --key-code=<uint>          deprecated: use --hotkey
       --evdev=<str>              Linux evdev path/name:DEV (empty = auto-scan)
       --device=<str>             mic (empty = default)
       --list-devices             list mics and exit
@@ -161,12 +164,13 @@ language = ""
 keyterm = ""
 
 [hotkey]
-key_code = 67            # default F9; yours to change, see "Key codes"
-mode = "hold"            # hold | toggle
-cancel_key_code = 46     # default C
-clipboard_key_code = -1  # off; a recording started with this key lands in the clipboard
-evdev = ""
-evdev_name = ""
+shortcut = "f9"        # hold to record; release to transcribe
+cancel = "meta+f8"     # discard the recording in progress
+clipboard = "meta+f10" # record, then put the transcript on the clipboard
+search = "off"         # record, then search for the transcript
+mode = "hold"          # hold | toggle
+evdev = ""             # Linux only, explicit /dev/input/eventN
+evdev_name = ""        # Linux only, device name match e.g. "kanata"
 
 [audio]
 device = ""              # empty = system default mic
@@ -210,43 +214,46 @@ Right-click the tray icon to change a setting. The selection is written to `conf
 - Each provider reads only its own key variable, so export every key you may switch to: `GROQ_API_KEY`, `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`. A provider whose key is absent is greyed out, because the daemon reads the environment only at startup.
 - Every other key is still read once at startup. Hand edits to those keys need a restart; only the rows in the table above apply live.
 - The menu is Linux-only for now. On Windows and macOS the icon works as before, without a menu.
+- The root menu lists the bound shortcuts and cannot change them.
 
-## Key codes
+## Shortcuts
 
-You choose which keys do what, in `[hotkey]`:
+A binding is a bare function key, or `modifier+key`. A function key (`f1`–`f24`) may stand alone. Every other key needs `meta`, and `shift` is optional. `meta` means Super on Linux, Win on Windows, Command on macOS.
+
+`ctrl` and `alt` are rejected on purpose: holding them while the transcript is typed turns letters into control characters or menu accelerators. A config with `ctrl+8` fails at startup and says so.
+
+A bare function key cannot share its key with an old numeric setting for a different action: the listener would fire one and silently ignore the other, so that config fails at startup and tells you to give both actions shortcut strings.
+
+Key names are portable, so the same config works on Linux and Windows:
+
+| Group | Names |
+|---|---|
+| Letters | `a`–`z` |
+| Digits | `0`–`9` |
+| Function keys | `f1`–`f24` |
+| Named keys | `space`, `enter` (`return`), `tab`, `esc` (`escape`), `backspace`, `delete` (`del`), `insert`, `home`, `end`, `pageup`, `pagedown`, `left`, `right`, `up`, `down`, `minus`, `equal`, `comma`, `period`, `slash`, `backslash`, `semicolon`, `quote`, `bracketleft`, `bracketright`, `grave` |
+
+The key name is the physical key: `meta+shift+1` is the 1 key with meta and shift, not the `!` character.
+
+A chord fires only while every modifier is down, in any press order, and stops when any of them is released.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `key_code` | 67 | Press-and-hold to record; release to stop and transcribe |
-| `cancel_key_code` | 46 | Discard the recording in progress |
-| `clipboard_key_code` | -1 (off) | Record, then put the transcript on the clipboard instead of typing it |
-| `mode` | `"hold"` | `hold` = talk while held, `toggle` = press to start, press to stop |
+| `shortcut` | `f9` | Press-and-hold to record; release to stop and transcribe |
+| `cancel` | `meta+f8` | Discard the recording in progress |
+| `clipboard` | `meta+f10` | Record, then put the transcript on the clipboard instead of typing it |
+| `search` | `off` | Record, then search for the transcript |
+| `mode` | `hold` | `hold` = talk while held, `toggle` = press to start, press to stop |
 
-Set a key to `-1` (or any negative value) to disable it. `0` is a real key on macOS (`kVK_ANSI_A`), not a disable.
+`""` keeps the default and `"off"` disables an action. With the clipboard on by default, an empty value cannot also mean off.
 
-### Finding the code for your key
+Defaults changed: a config with no `[hotkey]` section now records on `f9`, cancels on `meta+f8`, and puts the transcript on the clipboard on `meta+f10` instead of typing it. A recording started with `meta+f10` goes to the clipboard, not into the focused app. Search stays off.
 
-`zhisper` uses each operating system's **native** key code, and those encodings are different — a code that works on one platform means nothing on the others. Look yours up in the platform's own reference:
+The record default is the old bare F9 with no modifier, so an upgrade from `key_code = 67` keeps exactly the same press. Cancel and clipboard gained a `meta` chord, so those keep the same key with Super/Win added.
 
-**Linux** — `input-event-codes.h`, the `KEY_*` constants
-<https://www.kernel.org/doc/html/latest/input/input-event-codes.html>
+The old numeric settings (`key_code`, `cancel_key_code`, `clipboard_key_code`, `search_key_code`) still work with no modifier and log a deprecation line. A shortcut string wins over a number for the same action. Numeric codes remain accepted for old configs.
 
-**macOS** — Carbon `Events.h`, the `kVK_*` constants
-<https://developer.apple.com/documentation/coregraphics/1588252-ansikeys>
-
-**Windows** — `WinUser.h`, the `VK_*` virtual-key codes
-<https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes>
-
-A few to orient you, not a complete list — the references above are the complete list:
-
-| Key | Linux | macOS | Windows |
-|---|---|---|---|
-| A | 30 | 0 | 0x41 |
-| C | 46 | 8 | 0x43 |
-| F9 | 67 | 0x78 | 0x78 |
-| Return | 28 | 36 | 0x0D |
-
-Copy the number as-is: the config takes the native value, so a Linux `KEY_*` constant goes in directly, and macOS/Windows values go in as decimal or hex (`0x0D` and `13` are the same number to the parser).
+The tray menu shows the bound shortcuts as read-only rows.
 
 ## Environment variables
 

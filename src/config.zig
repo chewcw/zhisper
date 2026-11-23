@@ -2,6 +2,7 @@ const std = @import("std");
 const toml = @import("toml");
 const normalize = @import("normalize.zig");
 const notify = @import("notify_types.zig");
+const shortcut = @import("shortcut.zig");
 
 pub const TranscribeCfg = struct {
     provider: []const u8 = "groq",
@@ -25,7 +26,22 @@ pub const NormalizeCfg = struct {
     context: []const u8 = "general",
 };
 
+// WHY bare: F9 was the default before shortcut strings existed, and a function
+// key produces no character, so it needs no modifier to be safe to type after.
+pub const default_shortcut = "f9";
+pub const default_cancel = "meta+f8";
+pub const default_clipboard = "meta+f10";
+pub const default_search = "off";
+pub const off_token = "off";
+
 pub const HotkeyCfg = struct {
+    shortcut: []const u8 = "",
+    cancel: []const u8 = "",
+    clipboard: []const u8 = "",
+    search: []const u8 = "",
+    mode: []const u8 = "hold",
+    evdev: []const u8 = "",
+    evdev_name: []const u8 = "",
     /// OS-native key code; null and -1 both mean "disabled". 0 is a real key
     /// (macOS kVK_ANSI_A is 0).
     ///
@@ -35,9 +51,6 @@ pub const HotkeyCfg = struct {
     /// the parser forces an *absent* optional to null before it consults
     /// default_value_ptr; the real defaults are applied in parseFileConfig.
     key_code: ?i16 = null,
-    mode: []const u8 = "hold",
-    evdev: []const u8 = "",
-    evdev_name: []const u8 = "",
     cancel_key_code: ?i16 = null,
     /// OS-native key code for the clipboard-capture key, in the same encoding
     /// as key_code. null (absent) and any negative value both mean the feature
@@ -50,6 +63,83 @@ pub const HotkeyCfg = struct {
     /// the transcript.
     search_key_code: ?i16 = null,
 };
+
+pub const Hotkeys = struct {
+    shortcut: shortcut.Binding,
+    cancel: shortcut.Binding,
+    clipboard: ?shortcut.Binding = null,
+    search: ?shortcut.Binding = null,
+};
+
+pub const ShortcutProblem = struct {
+    field: []const u8,
+    err: shortcut.ParseError,
+};
+
+fn isOffToken(v: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(std.mem.trim(u8, v, " \t\r\n"), off_token);
+}
+
+fn resolveAction(
+    value: []const u8,
+    legacy: ?i16,
+    default_value: []const u8,
+    comptime required: bool,
+) !?shortcut.Binding {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len > 0) {
+        if (isOffToken(trimmed)) {
+            if (required) return error.InvalidShortcut;
+            return null;
+        }
+        // A negative legacy code disables an optional action even when the
+        // string is still at its default value.
+        if (!required and legacy != null and legacy.? < 0 and std.mem.eql(u8, trimmed, default_value)) {
+            return null;
+        }
+        return .{ .chord = try shortcut.parse(trimmed) };
+    }
+    if (keyCodeOf(legacy)) |code| return .{ .raw_code = code };
+    if (legacy != null and legacy.? < 0) {
+        if (required) return error.InvalidShortcut;
+        return null;
+    }
+    // Empty string + no legacy: use the built-in default.
+    if (isOffToken(default_value)) {
+        if (required) return error.InvalidShortcut;
+        return null;
+    }
+    return .{ .chord = try shortcut.parse(default_value) };
+}
+
+pub fn resolveHotkeys(hotkey: HotkeyCfg) !Hotkeys {
+    const record_binding = try resolveAction(hotkey.shortcut, hotkey.key_code, default_shortcut, true) orelse
+        return error.InvalidShortcut;
+    const cancel_binding = try resolveAction(hotkey.cancel, hotkey.cancel_key_code, default_cancel, true) orelse
+        return error.InvalidShortcut;
+    return .{
+        .shortcut = record_binding,
+        .cancel = cancel_binding,
+        .clipboard = try resolveAction(hotkey.clipboard, hotkey.clipboard_key_code, default_clipboard, false),
+        .search = try resolveAction(hotkey.search, hotkey.search_key_code, default_search, false),
+    };
+}
+
+pub fn findShortcutProblem(hotkey: HotkeyCfg) ?ShortcutProblem {
+    const fields = [_]struct { name: []const u8, value: []const u8 }{
+        .{ .name = "shortcut", .value = hotkey.shortcut },
+        .{ .name = "cancel", .value = hotkey.cancel },
+        .{ .name = "clipboard", .value = hotkey.clipboard },
+        .{ .name = "search", .value = hotkey.search },
+    };
+    for (fields) |f| {
+        const trimmed = std.mem.trim(u8, f.value, " \t\r\n");
+        if (trimmed.len == 0) continue;
+        if (isOffToken(trimmed)) continue;
+        _ = shortcut.parse(trimmed) catch |err| return .{ .field = f.name, .err = err };
+    }
+    return null;
+}
 
 /// Where a search recording sends its query. The value is a prefix only;
 /// the percent-encoded transcript is appended to it.
@@ -111,6 +201,11 @@ pub const Config = struct {
 pub fn defaultConfig() Config {
     return .{
         .hotkey = .{
+            .shortcut = default_shortcut,
+            .cancel = default_cancel,
+            .clipboard = default_clipboard,
+            .search = default_search,
+            // Keep legacy integer defaults for main.zig compatibility.
             .key_code = default_key_code,
             .cancel_key_code = default_cancel_key_code,
         },
@@ -127,6 +222,10 @@ pub const CliOverrides = struct {
     base_url: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
     language: ?[]const u8 = null,
+    shortcut: ?[]const u8 = null,
+    cancel: ?[]const u8 = null,
+    clipboard: ?[]const u8 = null,
+    search: ?[]const u8 = null,
     key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
@@ -151,17 +250,30 @@ pub fn parseFileConfig(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !Co
     defer parser.deinit();
     var result = try parser.parseFile(io, path);
     defer result.deinit();
-    // result.value borrows the parse arena, which deinit frees — copy every
-    // string into gpa so the returned Config outlives this call. Release
-    // with freeConfig. (defaultConfig borrows literals and must NOT be freed.)
-    var out = try dupeConfig(gpa, result.value);
+
+    var out = result.value;
     // An absent optional key parses to null (the toml parser forces null before
     // it consults the field default), and this function's result replaces the
     // default config wholesale rather than merging into it. So re-apply the
-    // defaults here.
-    if (out.hotkey.key_code == null) out.hotkey.key_code = default_key_code;
-    if (out.hotkey.cancel_key_code == null) out.hotkey.cancel_key_code = default_cancel_key_code;
-    return out;
+    // defaults here. Apply string defaults before dupeConfig so literals are
+    // never attached to the owned config after duping.
+    const key_code_was_null = out.hotkey.key_code == null;
+    const cancel_key_code_was_null = out.hotkey.cancel_key_code == null;
+    const clipboard_key_code_was_null = out.hotkey.clipboard_key_code == null;
+    const search_key_code_was_null = out.hotkey.search_key_code == null;
+
+    if (out.hotkey.shortcut.len == 0 and key_code_was_null) out.hotkey.shortcut = default_shortcut;
+    if (out.hotkey.cancel.len == 0 and cancel_key_code_was_null) out.hotkey.cancel = default_cancel;
+    if (out.hotkey.clipboard.len == 0 and clipboard_key_code_was_null) out.hotkey.clipboard = default_clipboard;
+    if (out.hotkey.search.len == 0 and search_key_code_was_null) out.hotkey.search = default_search;
+
+    if (key_code_was_null) out.hotkey.key_code = default_key_code;
+    if (cancel_key_code_was_null) out.hotkey.cancel_key_code = default_cancel_key_code;
+
+    // result.value borrows the parse arena, which deinit frees — copy every
+    // string into gpa so the returned Config outlives this call. Release
+    // with freeConfig. (defaultConfig borrows literals and must NOT be freed.)
+    return dupeConfig(gpa, out);
 }
 
 /// Copies every string field out of `cfg` into gpa-owned memory.
@@ -189,6 +301,14 @@ pub fn dupeConfig(gpa: std.mem.Allocator, cfg: Config) !Config {
     errdefer gpa.free(out.normalize.structure);
     out.normalize.context = try gpa.dupe(u8, cfg.normalize.context);
     errdefer gpa.free(out.normalize.context);
+    out.hotkey.shortcut = try gpa.dupe(u8, cfg.hotkey.shortcut);
+    errdefer gpa.free(out.hotkey.shortcut);
+    out.hotkey.cancel = try gpa.dupe(u8, cfg.hotkey.cancel);
+    errdefer gpa.free(out.hotkey.cancel);
+    out.hotkey.clipboard = try gpa.dupe(u8, cfg.hotkey.clipboard);
+    errdefer gpa.free(out.hotkey.clipboard);
+    out.hotkey.search = try gpa.dupe(u8, cfg.hotkey.search);
+    errdefer gpa.free(out.hotkey.search);
     out.hotkey.mode = try gpa.dupe(u8, cfg.hotkey.mode);
     errdefer gpa.free(out.hotkey.mode);
     out.hotkey.evdev = try gpa.dupe(u8, cfg.hotkey.evdev);
@@ -217,6 +337,10 @@ pub fn freeConfig(gpa: std.mem.Allocator, cfg: Config) void {
     gpa.free(cfg.normalize.styling);
     gpa.free(cfg.normalize.structure);
     gpa.free(cfg.normalize.context);
+    gpa.free(cfg.hotkey.shortcut);
+    gpa.free(cfg.hotkey.cancel);
+    gpa.free(cfg.hotkey.clipboard);
+    gpa.free(cfg.hotkey.search);
     gpa.free(cfg.hotkey.mode);
     gpa.free(cfg.hotkey.evdev);
     gpa.free(cfg.hotkey.evdev_name);
@@ -232,12 +356,17 @@ pub const EnvValues = struct {
     prompt: ?[]const u8 = null,
     language: ?[]const u8 = null,
     keyterm: ?[]const u8 = null,
+    shortcut: ?[]const u8 = null,
+    cancel: ?[]const u8 = null,
+    clipboard: ?[]const u8 = null,
+    search: ?[]const u8 = null,
     key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
     evdev_name: ?[]const u8 = null,
     cancel_key_code: ?i16 = null,
     clipboard_key_code: ?i16 = null,
+    search_key_code: ?i16 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -253,12 +382,29 @@ pub fn applyEnv(cfg: Config, env: EnvValues) Config {
     if (env.prompt) |v| out.transcribe.prompt = v;
     if (env.language) |v| out.transcribe.language = v;
     if (env.keyterm) |v| out.transcribe.keyterm = v;
-    if (env.key_code) |v| out.hotkey.key_code = v;
+    if (env.shortcut) |v| out.hotkey.shortcut = v;
+    if (env.cancel) |v| out.hotkey.cancel = v;
+    if (env.clipboard) |v| out.hotkey.clipboard = v;
+    if (env.search) |v| out.hotkey.search = v;
+    if (env.key_code) |v| {
+        out.hotkey.key_code = v;
+        if (env.shortcut == null) out.hotkey.shortcut = "";
+    }
     if (env.mode) |v| out.hotkey.mode = v;
     if (env.evdev) |v| out.hotkey.evdev = v;
     if (env.evdev_name) |v| out.hotkey.evdev_name = v;
-    if (env.cancel_key_code) |v| out.hotkey.cancel_key_code = v;
-    if (env.clipboard_key_code) |v| out.hotkey.clipboard_key_code = v;
+    if (env.cancel_key_code) |v| {
+        out.hotkey.cancel_key_code = v;
+        if (env.cancel == null) out.hotkey.cancel = "";
+    }
+    if (env.clipboard_key_code) |v| {
+        out.hotkey.clipboard_key_code = v;
+        if (env.clipboard == null) out.hotkey.clipboard = "";
+    }
+    if (env.search_key_code) |v| {
+        out.hotkey.search_key_code = v;
+        if (env.search == null) out.hotkey.search = "";
+    }
     if (env.device) |v| out.audio.device = v;
     if (env.min_duration_ms) |v| out.daemon.min_duration_ms = v;
     if (env.wav_path) |v| out.daemon.wav_path = v;
@@ -274,6 +420,10 @@ pub fn applyCli(cfg: Config, cli: CliOverrides) Config {
         .base_url = cli.base_url,
         .prompt = cli.prompt,
         .language = cli.language,
+        .shortcut = cli.shortcut,
+        .cancel = cli.cancel,
+        .clipboard = cli.clipboard,
+        .search = cli.search,
         .key_code = cli.key_code,
         .mode = cli.mode,
         .evdev = cli.evdev,
@@ -315,17 +465,14 @@ pub fn validate(cfg: Config) !void {
         if (cfg.transcribe.language.len != 0 and !validLanguageTag(cfg.transcribe.language)) return error.InvalidLanguage;
     }
     if (!std.mem.eql(u8, cfg.hotkey.mode, "hold") and !std.mem.eql(u8, cfg.hotkey.mode, "toggle")) return error.InvalidMode;
-    const hotkey = keyCodeOf(cfg.hotkey.key_code) orelse return error.InvalidKeyCode;
-    if (keyCodeOf(cfg.hotkey.cancel_key_code)) |cancel| {
-        if (cancel == hotkey) return error.CancelEqualsHotkey;
-    }
-    // A clipboard key bound to either existing key would make one physical key
-    // mean two different things, and the decode order in the OS seam would
-    // silently pick a winner.
-    if (keyCodeOf(cfg.hotkey.clipboard_key_code)) |clip| {
-        if (clip == hotkey) return error.ClipboardKeyCollision;
-        if (keyCodeOf(cfg.hotkey.cancel_key_code)) |cancel| {
-            if (clip == cancel) return error.ClipboardKeyCollision;
+    if (findShortcutProblem(cfg.hotkey) != null) return error.InvalidShortcut;
+    const hk = resolveHotkeys(cfg.hotkey) catch return error.InvalidShortcut;
+    const bindings = [_]?shortcut.Binding{ hk.shortcut, hk.cancel, hk.clipboard, hk.search };
+    for (bindings, 0..) |a, i| {
+        const ba = a orelse continue;
+        for (bindings[i + 1 ..]) |b| {
+            const bb = b orelse continue;
+            if (shortcut.Binding.eql(ba, bb)) return error.ShortcutCollision;
         }
     }
     if (cfg.daemon.min_duration_ms == 0) return error.InvalidDuration;
@@ -381,12 +528,17 @@ pub fn readEnvValues() EnvValues {
         .prompt = envStr("ZHISPER_PROMPT"),
         .language = envStr("ZHISPER_LANGUAGE"),
         .keyterm = envStr("ZHISPER_KEYTERM"),
+        .shortcut = envStr("ZHISPER_HOTKEY"),
+        .cancel = envStr("ZHISPER_CANCEL"),
+        .clipboard = envStr("ZHISPER_CLIPBOARD"),
+        .search = envStr("ZHISPER_SEARCH"),
         .key_code = envI16("ZHISPER_KEY_CODE"),
         .mode = envStr("ZHISPER_MODE"),
         .evdev = envStr("ZHISPER_EVDEV"),
         .evdev_name = envStr("ZHISPER_EVDEV_NAME"),
         .cancel_key_code = envI16("ZHISPER_CANCEL_KEY_CODE"),
         .clipboard_key_code = envI16("ZHISPER_CLIPBOARD_KEY_CODE"),
+        .search_key_code = envI16("ZHISPER_SEARCH_KEY_CODE"),
         .device = envStr("ZHISPER_DEVICE"),
         .min_duration_ms = envU32("ZHISPER_MIN_DURATION_MS"),
         .wav_path = envStr("ZHISPER_WAV_PATH"),
@@ -444,7 +596,7 @@ pub fn fileSignature(io: std.Io, path: []const u8) ?std.Io.File.Stat {
 const known_sections = [_]struct { name: []const u8, keys: []const []const u8 }{
     .{ .name = "transcribe", .keys = &.{ "provider", "model", "base_url", "prompt", "language", "keyterm" } },
     .{ .name = "normalize", .keys = &.{ "enabled", "model", "base_url", "styling", "structure", "context" } },
-    .{ .name = "hotkey", .keys = &.{ "key_code", "mode", "evdev", "evdev_name", "cancel_key_code", "clipboard_key_code", "search_key_code" } },
+    .{ .name = "hotkey", .keys = &.{ "shortcut", "cancel", "clipboard", "search", "mode", "evdev", "evdev_name", "key_code", "cancel_key_code", "clipboard_key_code", "search_key_code" } },
     .{ .name = "audio", .keys = &.{"device"} },
     .{ .name = "daemon", .keys = &.{ "min_duration_ms", "wav_path", "keep_wav_on_error", "trailing_newline", "type_delay_ms", "overlay", "tray", "notify", "verbose" } },
     .{ .name = "search", .keys = &.{"base_url"} },
@@ -490,7 +642,7 @@ fn checkUnknownFields(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !voi
             {
                 if (entry.value_ptr.* == .integer) {
                     const v = entry.value_ptr.integer;
-                    if (v < -1 or v > 32767) return error.InvalidKeyCode;
+                    if (v < -1 or v > 32767) return error.InvalidShortcut;
                 }
             }
             if (ok) continue;
@@ -659,12 +811,10 @@ test "cancel_key_code defaults to 46 and overlays via env struct" {
     try std.testing.expectEqual(@as(?i16, 48), out.hotkey.cancel_key_code);
 }
 
-test "validate accepts a disabled cancel key but rejects one equal to the hotkey" {
+test "validate rejects a cancel binding that resolves to the hotkey's key" {
     var cfg = defaultConfig();
-    cfg.hotkey.cancel_key_code = -1;
-    try validate(cfg);
-    cfg.hotkey.cancel_key_code = cfg.hotkey.key_code;
-    try std.testing.expectError(error.CancelEqualsHotkey, validate(cfg));
+    cfg.hotkey.cancel = "f9";
+    try std.testing.expectError(error.ShortcutCollision, validate(cfg));
 }
 
 test "keyCodeOf maps null and -1 to disabled" {
@@ -680,10 +830,12 @@ test "keyCodeOf preserves 0 as a real key" {
 
 test "validate rejects a disabled hotkey" {
     var cfg = defaultConfig();
-    cfg.hotkey.key_code = -1;
-    try std.testing.expectError(error.InvalidKeyCode, validate(cfg));
+    cfg.hotkey.shortcut = "off";
     cfg.hotkey.key_code = null;
-    try std.testing.expectError(error.InvalidKeyCode, validate(cfg));
+    try std.testing.expectError(error.InvalidShortcut, validate(cfg));
+    cfg.hotkey.shortcut = "";
+    cfg.hotkey.key_code = -1;
+    try std.testing.expectError(error.InvalidShortcut, validate(cfg));
 }
 
 test "parseFileConfig defaults an omitted key code to KEY_F9" {
@@ -716,7 +868,7 @@ test "parseFileConfig rejects an out-of-range key code instead of panicking" {
     const doc = "[hotkey]\nkey_code = 70000\n";
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-huge.toml", .data = doc });
     defer std.Io.Dir.cwd().deleteFile(io, "cfg-huge.toml") catch {};
-    try std.testing.expectError(error.InvalidKeyCode, parseFileConfig(gpa, io, "cfg-huge.toml"));
+    try std.testing.expectError(error.InvalidShortcut, parseFileConfig(gpa, io, "cfg-huge.toml"));
 }
 
 test "parseFileConfig reads cancel_key_code" {
@@ -855,7 +1007,7 @@ test "an out-of-range clipboard_key_code errors instead of panicking the parser"
     // The vendored toml parser assigns integers with a safety-checked @intCast,
     // so without the range check in checkUnknownFields this would panic the
     // daemon at startup.
-    try std.testing.expectError(error.InvalidKeyCode, parseFileConfig(gpa, io, "cfg-clip-big.toml"));
+    try std.testing.expectError(error.InvalidShortcut, parseFileConfig(gpa, io, "cfg-clip-big.toml"));
 }
 
 test "validate accepts a clipboard key distinct from both other keys" {
@@ -866,11 +1018,11 @@ test "validate accepts a clipboard key distinct from both other keys" {
 
 test "validate rejects a clipboard key colliding with the hotkey or the cancel key" {
     var a = defaultConfig();
-    a.hotkey.clipboard_key_code = a.hotkey.key_code;
-    try std.testing.expectError(error.ClipboardKeyCollision, validate(a));
+    a.hotkey.clipboard = "f9";
+    try std.testing.expectError(error.ShortcutCollision, validate(a));
     var b = defaultConfig();
-    b.hotkey.clipboard_key_code = b.hotkey.cancel_key_code;
-    try std.testing.expectError(error.ClipboardKeyCollision, validate(b));
+    b.hotkey.clipboard = "meta+f8";
+    try std.testing.expectError(error.ShortcutCollision, validate(b));
 }
 
 test "a negative clipboard_key_code disables the feature rather than erroring" {
@@ -998,4 +1150,147 @@ test "parseFileConfig still rejects unknown transcribe keys after allowlist chan
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = "cfg-lang-typo.toml", .data = doc });
     defer std.Io.Dir.cwd().deleteFile(io, "cfg-lang-typo.toml") catch {};
     try std.testing.expectError(error.UnknownField, parseFileConfig(gpa, io, "cfg-lang-typo.toml"));
+}
+
+test "default config records on a bare F9 and keeps meta chords elsewhere" {
+    const cfg = defaultConfig();
+    try validate(cfg);
+    const hk = try resolveHotkeys(cfg.hotkey);
+    try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("f9") }));
+    try std.testing.expect(hk.cancel.eql(.{ .chord = try shortcut.parse("meta+f8") }));
+    try std.testing.expect(hk.clipboard.?.eql(.{ .chord = try shortcut.parse("meta+f10") }));
+    try std.testing.expect(hk.search == null);
+}
+
+test "the off token disables an action and an empty string keeps the default" {
+    const hk = try resolveHotkeys(.{ .clipboard = "off", .search = "" });
+    try std.testing.expect(hk.clipboard == null);
+    // search defaults to off as well, so an empty string and the token agree.
+    try std.testing.expect(hk.search == null);
+    const record = try resolveHotkeys(.{ .shortcut = "", .key_code = null });
+    try std.testing.expect(record.shortcut.eql(.{ .chord = try shortcut.parse("f9") }));
+}
+
+test "a shortcut string is parsed and a legacy integer becomes a raw code" {
+    const from_string = try resolveHotkeys(.{ .shortcut = "meta+shift+z", .cancel = "meta+f2" });
+    try std.testing.expect(from_string.shortcut.eql(.{ .chord = try shortcut.parse("meta+shift+z") }));
+    try std.testing.expect(from_string.cancel.eql(.{ .chord = try shortcut.parse("meta+f2") }));
+
+    const from_code = try resolveHotkeys(.{ .shortcut = "", .key_code = 67, .cancel = "", .cancel_key_code = 46 });
+    try std.testing.expect(from_code.shortcut.eql(.{ .raw_code = 67 }));
+    try std.testing.expect(from_code.cancel.eql(.{ .raw_code = 46 }));
+}
+
+test "a string wins over a legacy integer for the same action" {
+    const hk = try resolveHotkeys(.{ .shortcut = "meta+8", .key_code = 67, .cancel = "meta+c", .cancel_key_code = 46 });
+    try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("meta+8") }));
+}
+
+test "a negative legacy code disables the optional actions even against a default" {
+    const hk = try resolveHotkeys(.{ .shortcut = "meta+8", .cancel = "meta+c", .clipboard_key_code = -1, .search_key_code = -1 });
+    try std.testing.expect(hk.clipboard == null);
+    try std.testing.expect(hk.search == null);
+}
+
+test "two actions on the same binding fail validation" {
+    var cfg = defaultConfig();
+    cfg.hotkey.cancel = "f9";
+    try std.testing.expectError(error.ShortcutCollision, validate(cfg));
+
+    var legacy = defaultConfig();
+    legacy.hotkey.shortcut = "";
+    legacy.hotkey.key_code = 67;
+    legacy.hotkey.cancel = "";
+    legacy.hotkey.cancel_key_code = 67;
+    try std.testing.expectError(error.ShortcutCollision, validate(legacy));
+}
+
+test "an unsupported modifier is reported against the setting that carries it" {
+    var cfg = defaultConfig();
+    cfg.hotkey.clipboard = "ctrl+8";
+    try std.testing.expectError(error.InvalidShortcut, validate(cfg));
+    const problem = findShortcutProblem(cfg.hotkey).?;
+    try std.testing.expectEqualStrings("clipboard", problem.field);
+    try std.testing.expectEqual(shortcut.ParseError.UnsupportedModifier, problem.err);
+}
+
+test "every string setting survives dupe and free" {
+    const gpa = std.testing.allocator;
+    var cfg = defaultConfig();
+    cfg.hotkey.clipboard = "meta+8";
+    cfg.hotkey.search = "meta+9";
+    const owned = try dupeConfig(gpa, cfg);
+    defer freeConfig(gpa, owned);
+    try std.testing.expectEqualStrings("meta+8", owned.hotkey.clipboard);
+    try std.testing.expectEqualStrings("meta+9", owned.hotkey.search);
+    try std.testing.expectEqualStrings("f9", owned.hotkey.shortcut);
+    try std.testing.expectEqualStrings("meta+f8", owned.hotkey.cancel);
+}
+
+test "legacy-only file key_code resolves to raw code and keeps default clipboard chord" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\key_code = 70
+        \\
+    ;
+    const path = "/tmp/zhisper-config-legacy-only-test.toml";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const cfg = try parseFileConfig(gpa, io, path);
+    defer freeConfig(gpa, cfg);
+    const hk = try resolveHotkeys(cfg.hotkey);
+    try std.testing.expect(hk.shortcut.eql(.{ .raw_code = 70 }));
+    try std.testing.expect(hk.clipboard.?.eql(.{ .chord = try shortcut.parse("meta+f10") }));
+}
+
+test "legacy-only file clipboard_key_code -1 leaves clipboard action null" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\clipboard_key_code = -1
+        \\
+    ;
+    const path = "/tmp/zhisper-config-legacy-clip-off-test.toml";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const cfg = try parseFileConfig(gpa, io, path);
+    defer freeConfig(gpa, cfg);
+    const hk = try resolveHotkeys(cfg.hotkey);
+    try std.testing.expect(hk.clipboard == null);
+}
+
+test "shortcut string wins over legacy key_code in parsed file" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    const doc =
+        \\[hotkey]
+        \\shortcut = "meta+8"
+        \\key_code = 70
+        \\
+    ;
+    const path = "/tmp/zhisper-config-shortcut-wins-test.toml";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = doc });
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    const cfg = try parseFileConfig(gpa, io, path);
+    defer freeConfig(gpa, cfg);
+    const hk = try resolveHotkeys(cfg.hotkey);
+    try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("meta+8") }));
+}
+
+test "a shortcut env var overrides the file string" {
+    const cfg = applyEnv(defaultConfig(), .{ .shortcut = "meta+8" });
+    try std.testing.expectEqualStrings("meta+8", cfg.hotkey.shortcut);
+}
+
+test "a legacy env code clears the string so the explicit flag wins" {
+    // Without the clear, the parsed file string would keep winning over the
+    // higher-precedence integer and the user's --key-code would do nothing.
+    var cfg = defaultConfig();
+    cfg.hotkey.shortcut = "meta+8";
+    const out = applyEnv(cfg, .{ .key_code = 67 });
+    try std.testing.expectEqualStrings("", out.hotkey.shortcut);
+    try std.testing.expectEqual(@as(?i16, 67), out.hotkey.key_code);
 }

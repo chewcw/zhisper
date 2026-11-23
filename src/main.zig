@@ -31,6 +31,90 @@ fn notifyLevelFromString(s: []const u8) !zhisper.notify.Level {
     return error.InvalidNotifyLevel;
 }
 
+fn legacyHotkeyKeysInUse(hotkey: zhisper.config.HotkeyCfg) [4]bool {
+    return .{
+        hotkey.shortcut.len == 0 and hotkey.key_code != null,
+        hotkey.cancel.len == 0 and hotkey.cancel_key_code != null,
+        hotkey.clipboard.len == 0 and hotkey.clipboard_key_code != null,
+        hotkey.search.len == 0 and hotkey.search_key_code != null,
+    };
+}
+
+fn clipboardBound(hotkeys: zhisper.config.Hotkeys) bool {
+    const b = hotkeys.clipboard orelse return false;
+    return switch (b) {
+        .chord => true,
+        .raw_code => |code| code != 0,
+    };
+}
+
+fn findShortcutCollision(hotkey: zhisper.config.HotkeyCfg) ?struct { a: []const u8, b: []const u8 } {
+    const hk = zhisper.config.resolveHotkeys(hotkey) catch return null;
+    const pairs = [_]struct { name: []const u8, binding: ?zhisper.shortcut.Binding }{
+        .{ .name = "shortcut", .binding = hk.shortcut },
+        .{ .name = "cancel", .binding = hk.cancel },
+        .{ .name = "clipboard", .binding = hk.clipboard },
+        .{ .name = "search", .binding = hk.search },
+    };
+    for (pairs, 0..) |pa, i| {
+        const ba = pa.binding orelse continue;
+        for (pairs[i + 1 ..]) |pb| {
+            const bb = pb.binding orelse continue;
+            if (zhisper.shortcut.Binding.eql(ba, bb)) return .{ .a = pa.name, .b = pb.name };
+        }
+    }
+    return null;
+}
+
+fn hotkeyStartupFailure(err: anyerror, hotkey: zhisper.config.HotkeyCfg) noreturn {
+    switch (err) {
+        error.InvalidShortcut => {
+            if (zhisper.config.findShortcutProblem(hotkey)) |problem| {
+                std.log.err(
+                    "hotkey.{s} is not a valid shortcut ({s})",
+                    .{ problem.field, @errorName(problem.err) },
+                );
+                std.log.err("{s}", .{shortcutHint()});
+            } else {
+                std.log.err("hotkey shortcut is invalid ({s})", .{@errorName(err)});
+            }
+        },
+        error.ShortcutCollision => {
+            if (findShortcutCollision(hotkey)) |pair| {
+                std.log.err(
+                    "hotkey.{s} and hotkey.{s} are the same binding",
+                    .{ pair.a, pair.b },
+                );
+            } else {
+                std.log.err("a bare function key and an old numeric key code may name the same key; give both actions shortcut strings", .{});
+                std.log.err("hotkey bindings collide ({s})", .{@errorName(err)});
+            }
+        },
+        else => std.log.err("hotkey setup failed: {s}", .{@errorName(err)}),
+    }
+    std.process.exit(1);
+}
+
+/// Printed when a shortcut string fails to parse. The parser's error name alone
+/// ("MissingMetaModifier") does not tell the user that a function key may stand
+/// alone, so the accepted shapes are spelled out here.
+fn shortcutHint() []const u8 {
+    return "a shortcut is a bare function key (f1-f24), or meta+key with optional shift, " ++
+        "for example \"f9\" or \"meta+f9\"";
+}
+
+fn waitForModifiersReleased(io: std.Io, held: *const fn () bool, budget_ms: u64, step_ms: u64) bool {
+    if (!held()) return true;
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    const budget_ns: i96 = @as(i96, @intCast(budget_ms)) * std.time.ns_per_ms;
+    while (true) {
+        io.sleep(.fromMilliseconds(@intCast(step_ms)), .awake) catch {};
+        if (!held()) return true;
+        const elapsed = start.durationTo(std.Io.Clock.Timestamp.now(io, .awake));
+        if (elapsed.raw.nanoseconds >= budget_ns) return false;
+    }
+}
+
 /// 16kHz mono s16 = 32000 bytes/sec = 32 bytes/ms of payload (header excluded).
 fn minWavPayloadBytes(min_duration_ms: u32) usize {
     return @as(usize, min_duration_ms) * 32;
@@ -579,6 +663,12 @@ fn workerMain(
             }
         }
         const inject_log = std.log.scoped(.inject);
+        // WHY: a held meta or shift turns the injected transcript into shell
+        // shortcuts or uppercase text. Waiting is cheap; a corrupted sentence is not.
+        // When the user keeps holding the chord, give up rather than drop the text.
+        if (!waitForModifiersReleased(io, &zhisper.hotkey.modifiersHeld, 1500, 10)) {
+            inject_log.debug("chord still held after 1500 ms, typing anyway", .{});
+        }
         switch (sink) {
             .typing => {
                 const n = zhisper.inject.typeText(final_text, io) catch |err| {
@@ -665,6 +755,13 @@ pub fn main(init: std.process.Init) !void {
 
     const cfg_path = if (overrides.config_path) |p| p else try resolveConfigPath(arena);
     const cfg = zhisper.config.load(arena, io, cfg_path, overrides) catch |err| {
+        if (err == error.InvalidShortcut or err == error.ShortcutCollision) {
+            var bad = zhisper.config.defaultConfig();
+            if (zhisper.config.parseFileConfig(arena, io, cfg_path) catch null) |fc| bad = fc;
+            bad = zhisper.config.applyEnv(bad, zhisper.config.readEnvValues());
+            bad = zhisper.config.applyCli(bad, overrides);
+            hotkeyStartupFailure(err, bad.hotkey);
+        }
         var errbuf: [256]u8 = undefined;
         var w = std.Io.File.stderr().writer(io, &errbuf);
         w.interface.print("zhisper: config error: {s}\n", .{@errorName(err)}) catch {};
@@ -677,7 +774,16 @@ pub fn main(init: std.process.Init) !void {
     };
     defer zhisper.config.freeConfig(arena, cfg);
     if (cfg.daemon.verbose) zhisper.log.setEnabled(true);
-    try zhisper.config.validate(cfg);
+    zhisper.config.validate(cfg) catch |err| switch (err) {
+        error.InvalidShortcut, error.ShortcutCollision => hotkeyStartupFailure(err, cfg.hotkey),
+        else => {
+            var errbuf: [256]u8 = undefined;
+            var w = std.Io.File.stderr().writer(io, &errbuf);
+            w.interface.print("zhisper: config error: {s}\n", .{@errorName(err)}) catch {};
+            w.interface.flush() catch {};
+            std.process.exit(1);
+        },
+    };
     const wav_base = try resolveWavPath(arena, cfg.daemon.wav_path);
 
     if (overrides.list_devices) {
@@ -718,38 +824,37 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     defer zhisper.inject.destroy();
-    const hotkey_code = zhisper.config.keyCodeOf(cfg.hotkey.key_code) orelse {
-        std.log.err("hotkey.key_code must be set to a real key code (use -1 to disable the cancel key, not the hotkey)", .{});
-        std.process.exit(1);
-    };
-    // Clipboard capture gate. A zero code means "off", so the gate and the OS
-    // seam agree on one value: when no clipboard tool exists we never hand the
-    // key to the seam at all, so it can never emit an event we cannot honour.
-    // The probe is skipped entirely when the key is unconfigured, so a daemon
-    // that does not use this feature never spawns a `which` subprocess.
+    var hotkeys = zhisper.config.resolveHotkeys(cfg.hotkey) catch |err| hotkeyStartupFailure(err, cfg.hotkey);
+
+    const legacy = legacyHotkeyKeysInUse(cfg.hotkey);
+    if (legacy[0]) daemon_log.warn("hotkey.key_code is deprecated, use hotkey.shortcut = \"f9\"", .{});
+    if (legacy[1]) daemon_log.warn("hotkey.cancel_key_code is deprecated, use hotkey.cancel = \"meta+f8\"", .{});
+    if (legacy[2]) daemon_log.warn("hotkey.clipboard_key_code is deprecated, use hotkey.clipboard = \"meta+f10\"", .{});
+    if (legacy[3]) daemon_log.warn("hotkey.search_key_code is deprecated, use hotkey.search = \"off\"", .{});
+
     var clipboard_state: zhisper.clipboard.Clipboard = .{ .available = false, .tool = null };
-    const clipboard_code: u16 = if (zhisper.config.keyCodeOf(cfg.hotkey.clipboard_key_code)) |code| blk: {
+    if (clipboardBound(hotkeys)) {
         clipboard_state = zhisper.clipboard.check(io);
         if (!clipboard_state.available) {
-            // .err, not .warn and not log.warn(): only .err bypasses the
-            // ZHISPER_DEBUG gate, and a hotkey that silently never fires reads
-            // to the user as a broken daemon or a broken keyboard. inject_linux
-            // uses the silent helper for its own clipboard degradation, which
-            // is a different failure — that one announces itself in the text.
-            daemon_log.err("clipboard_key_code={d} set but no clipboard tool found — clipboard capture disabled, use key_code instead", .{code});
-            break :blk 0;
+            const user_configured = !std.mem.eql(u8, cfg.hotkey.clipboard, zhisper.config.default_clipboard);
+            const msg = "hotkey.clipboard is set but no clipboard tool found — clipboard capture disabled; set hotkey.clipboard = \"off\" to silence this";
+            if (user_configured) daemon_log.err("{s}", .{msg}) else daemon_log.warn("{s}", .{msg});
+            hotkeys.clipboard = null;
         }
-        break :blk code;
-    } else 0;
+    }
+
     zhisper.hotkey.setup(.{
-        .key_code = hotkey_code,
+        .shortcut = hotkeys.shortcut,
+        .cancel = hotkeys.cancel,
+        .clipboard = hotkeys.clipboard,
+        .search = hotkeys.search,
         .mode = mode,
         .evdev = cfg.hotkey.evdev,
         .evdev_name = cfg.hotkey.evdev_name,
-        .cancel_key_code = zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
-        .clipboard_key_code = clipboard_code,
-        .search_key_code = zhisper.config.keyCodeOf(cfg.hotkey.search_key_code) orelse 0,
     }) catch |err| {
+        if (err == error.ShortcutCollision or err == error.InvalidShortcut) {
+            hotkeyStartupFailure(err, cfg.hotkey);
+        }
         std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -846,12 +951,25 @@ pub fn main(init: std.process.Init) !void {
     var have_start = false;
     var active_session: ?*zhisper.deepgram.Session = null;
     var wav_counter: u32 = 0;
-    const clipboard_label: []const u8 = if (clipboard_code == 0) "off" else "on";
-    daemon_log.info("listening (mode={s}, key={d}, cancel={d}, search={d}, clipboard={s}, notify={s}{s})", .{
+    var b_shortcut: [32]u8 = undefined;
+    var b_cancel: [32]u8 = undefined;
+    var b_clipboard: [32]u8 = undefined;
+    var b_search: [32]u8 = undefined;
+    const shortcut_label = hotkeys.shortcut.format(&b_shortcut) catch "?";
+    const cancel_label = hotkeys.cancel.format(&b_cancel) catch "?";
+    const clipboard_label: []const u8 = if (hotkeys.clipboard) |b|
+        (b.format(&b_clipboard) catch "?")
+    else
+        "off";
+    const search_label: []const u8 = if (hotkeys.search) |b|
+        (b.format(&b_search) catch "?")
+    else
+        "off";
+    daemon_log.info("listening (mode={s}, key={s}, cancel={s}, search={s}, clipboard={s}, notify={s}{s})", .{
         cfg.hotkey.mode,
-        hotkey_code,
-        zhisper.config.keyCodeOf(cfg.hotkey.cancel_key_code) orelse 0,
-        zhisper.config.keyCodeOf(cfg.hotkey.search_key_code) orelse 0,
+        shortcut_label,
+        cancel_label,
+        search_label,
         clipboard_label,
         cfg.daemon.notify,
         // `!` means "you asked for this and it is not available", so it must
@@ -1400,4 +1518,62 @@ test "a live provider change reaches the per-job transcribe config" {
     try std.testing.expectEqualStrings("https://api.openai.com/v1/audio/transcriptions", t.base_url);
     try std.testing.expectEqualStrings("whisper-1", t.model);
     try std.testing.expectEqualStrings("k", t.api_key);
+}
+
+test "legacy keys count as in use only when no string replaced them" {
+    const cfg = zhisper.config.HotkeyCfg{ .shortcut = "", .key_code = 67, .cancel = "meta+c", .cancel_key_code = 46 };
+    try std.testing.expectEqual([4]bool{ true, false, false, false }, legacyHotkeyKeysInUse(cfg));
+}
+
+test "legacy keys are not flagged for an empty config" {
+    try std.testing.expectEqual([4]bool{ false, false, false, false }, legacyHotkeyKeysInUse(zhisper.config.HotkeyCfg{}));
+}
+
+test "clipboard capture is gated on the binding, not on a code" {
+    // The gate must follow the binding: with a string binding there is no
+    // integer to compare against zero, and a missed gate means the daemon
+    // silently swallows a key bound to a clipboard tool that is not installed.
+    var hotkeys = zhisper.config.Hotkeys{ .shortcut = .{ .raw_code = 67 }, .cancel = .{ .raw_code = 46 } };
+    try std.testing.expect(!clipboardBound(hotkeys));
+    hotkeys.clipboard = .{ .raw_code = 87 };
+    try std.testing.expect(clipboardBound(hotkeys));
+}
+
+const HeldProbe = struct {
+    var calls: usize = 0;
+    var release_after: usize = 0;
+
+    fn held() bool {
+        calls += 1;
+        return calls <= release_after;
+    }
+};
+
+test "the wait returns as soon as the modifiers are up" {
+    HeldProbe.calls = 0;
+    HeldProbe.release_after = 2;
+    try std.testing.expect(waitForModifiersReleased(std.testing.io, &HeldProbe.held, 1000, 1));
+    try std.testing.expectEqual(@as(usize, 3), HeldProbe.calls);
+}
+
+test "the wait returns false when the budget runs out" {
+    HeldProbe.calls = 0;
+    HeldProbe.release_after = std.math.maxInt(usize);
+    try std.testing.expect(!waitForModifiersReleased(std.testing.io, &HeldProbe.held, 20, 5));
+}
+
+test "the wait returns at once when nothing is held" {
+    HeldProbe.calls = 0;
+    HeldProbe.release_after = 0;
+    try std.testing.expect(waitForModifiersReleased(std.testing.io, &HeldProbe.held, 1000, 5));
+    try std.testing.expectEqual(@as(usize, 1), HeldProbe.calls);
+}
+
+test "the shortcut hint names a bare function key and a meta chord" {
+    const hint = shortcutHint();
+    try std.testing.expect(std.mem.indexOf(u8, hint, "f1-f24") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "\"f9\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "\"meta+f9\"") != null);
+    // The old wording said meta was required, which a bare f9 now contradicts.
+    try std.testing.expect(std.mem.indexOf(u8, hint, "meta is required") == null);
 }

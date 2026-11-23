@@ -8,9 +8,13 @@ pub fn pollEvent() ?types.KeyEvent {
     return null;
 }
 
+pub fn modifiersHeld() bool {
+    return false;
+}
+
 pub fn destroy() void {}
 
 test "setup reports UnsupportedOs until the native hook lands" {
     const std = @import("std");
-    try std.testing.expectError(error.UnsupportedOs, setup(.{ .key_code = 0 }));
+    try std.testing.expectError(error.UnsupportedOs, setup(.{ .shortcut = .{ .raw_code = 0 }, .cancel = .{ .raw_code = 0 } }));
 }

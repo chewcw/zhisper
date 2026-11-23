@@ -18,9 +18,13 @@ const help_text =
     \\.      --model=<str>  model (empty = preset)
     \\.      --base-url=<str>  base URL (provider=custom only)
     \\.      --language=<str>  language tag (deepgram; empty = auto)
-    \\.      --key-code=<uint>  hotkey code (default 67=F9)
+    \\.      --hotkey=<str>  f9
+    \\.      --cancel=<str>  f8
+    \\.      --clipboard=<str>  f10
+    \\.      --search=<str>  off
+    \\.      --key-code=<uint>  old
+    \\.      --cancel-key-code=<uint>  old
     \\.      --mode=<str>  hold | toggle
-    \\.      --cancel-key-code=<uint>  cancel key (0=off, 46=C)
     \\.      --evdev=<str>  Linux evdev path/name:DEV
     \\.      --device=<str>  mic (empty = default)
     \\.      --list-devices  list mics and exit
@@ -46,9 +50,15 @@ fn fromParsed(parsed: anytype) config.CliOverrides {
     if (parsed.model) |v| cli.model = v;
     if (parsed.@"base-url") |v| cli.base_url = v;
     if (parsed.language) |v| cli.language = v;
+    if (parsed.hotkey) |v| cli.shortcut = v;
+    if (parsed.cancel) |v| cli.cancel = v;
+    if (parsed.clipboard) |v| cli.clipboard = v;
+    if (parsed.search) |v| cli.search = v;
     if (parsed.@"key-code") |v| cli.key_code = std.math.cast(i16, v);
     if (parsed.mode) |v| cli.mode = v;
-    if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(i16, v);
+    if (@hasField(@TypeOf(parsed), "cancel-key-code")) {
+        if (parsed.@"cancel-key-code") |v| cli.cancel_key_code = std.math.cast(i16, v);
+    }
     if (parsed.version > 0) cli.version = true;
     // --evdev accepts either a path (/dev/input/event5) or a logical
     // device name (name:kanata) that survives reboot renumbering.
@@ -166,4 +176,25 @@ test "cli parses --language and leaves it unset by default" {
 // parse error, and a passing test may not write to stderr in this repo.
 test "cli has no keyterm option" {
     try std.testing.expect(std.mem.indexOf(u8, help_text, "keyterm") == null);
+}
+
+test "cli parses the four shortcut flags" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--hotkey=meta+8", "--cancel=meta+c", "--clipboard=meta+1", "--search=meta+2" };
+    const cli = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqualStrings("meta+8", cli.shortcut.?);
+    try std.testing.expectEqualStrings("meta+c", cli.cancel.?);
+    try std.testing.expectEqualStrings("meta+1", cli.clipboard.?);
+    try std.testing.expectEqualStrings("meta+2", cli.search.?);
+}
+
+test "cli keeps the deprecated key-code flag working" {
+    const gpa = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const argv = [_][:0]const u8{ "zhisper", "--key-code=70" };
+    const cli = try parseCli(arena.allocator(), std.testing.io, &argv);
+    try std.testing.expectEqual(@as(?i16, 70), cli.key_code.?);
 }

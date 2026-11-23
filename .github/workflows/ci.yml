@@ -41,6 +41,59 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxext-dev libasound2-dev libudev-dev libevdev-dev
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+            zig-pkg
+          key: zig-pkgs-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-pkgs-${{ runner.os }}-
+      - name: Fetch dependencies (with retry + freetype pre-seed)
+        run: |
+          # WHY pre-seed: zig 0.16's built-in HTTP client fails with
+          # TlsInitializationFailed against download.savannah.gnu.org from
+          # GitHub runners, while curl succeeds. The URL lives in the
+          # transitive freetype package (sdl3 -> allyourcodebase/freetype ->
+          # Savannah tarball), so pre-download with curl and prime the Zig
+          # global cache. Then `zig build` never hits that host.
+          preseed_freetype() {
+            ZON=$(ls -d zig-pkg/freetype-*/build.zig.zon 2>/dev/null | head -n 1)
+            [ -n "$ZON" ] || return 1
+            URL=$(grep -oP '(?<=.url = ")[^"]+' "$ZON" | head -n 1)
+            EXPECT=$(grep -oP '(?<=.hash = ")[^"]+' "$ZON" | head -n 1)
+            [ -n "$URL" ] && [ -n "$EXPECT" ] || return 1
+            FILE=$(basename "$URL")
+            VER=$(echo "$FILE" | grep -oP 'freetype-\K[0-9.]+')
+            echo "pre-seeding freetype $VER (expect $EXPECT)"
+            for MIRROR in "$URL" "https://ftp.gnu.org/gnu/freetype/$FILE"; do
+              for i in 1 2 3; do
+                echo "trying $MIRROR (attempt $i)"
+                if curl -sSL -m 120 -o "/tmp/$FILE" "$MIRROR" \
+                  && tar -tJf "/tmp/$FILE" >/dev/null 2>&1; then
+                  GOT=$(zig fetch "/tmp/$FILE")
+                  echo "fetched hash: $GOT"
+                  if [ "$GOT" = "$EXPECT" ]; then return 0; fi
+                  echo "hash mismatch, trying next source..."
+                fi
+                sleep 10
+              done
+            done
+            return 1
+          }
+          for i in 1 2 3 4 5; do
+            zig build --fetch && break
+            echo "fetch attempt $i failed"
+            if preseed_freetype; then
+              echo "freetype pre-seeded, refetching..."
+              zig build --fetch && break
+            fi
+            echo "retrying in 15s..."
+            sleep 15
+            if [ "$i" -eq 5 ]; then exit 1; fi
+          done
       - name: Build
         run: zig build
       - name: Run tests

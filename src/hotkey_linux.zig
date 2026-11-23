@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const types = @import("hotkey_types.zig");
+const shortcut = @import("shortcut.zig");
 
 pub const KeyEvent = types.KeyEvent;
 pub const Mode = types.Mode;
@@ -13,7 +14,151 @@ const c = @cImport({
 });
 
 var fd_evdev: posix.fd_t = -1;
-var active_cfg: HotkeyConfig = .{ .key_code = 0 };
+var active_cfg: HotkeyConfig = .{ .shortcut = .{ .raw_code = 0 }, .cancel = .{ .raw_code = 0 } };
+
+// src/hotkey_linux.zig — KEY_A..KEY_Z are not contiguous, so the table is written out.
+const letters = [26]u16{ 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44 };
+const fkeys = [24]u16{ 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194 };
+// KEY_1..KEY_9 ascend to KEY_0, which sits last at 11.
+const digit_base = 2;
+// Modifier codes the chord state machine has to follow.
+const KEY_LEFTMETA_C = 125;
+const KEY_RIGHTMETA_C = 126;
+const KEY_LEFTSHIFT_C = 42;
+const KEY_RIGHTSHIFT_C = 54;
+
+const meta_bit: u16 = 1 << 0;
+const shift_bit: u16 = 1 << 1;
+
+var held: std.atomic.Value(u16) = .init(0);
+const Latched = enum { shortcut, clipboard, search };
+
+// WHY one latched slot instead of a slot per binding: pressing a second
+// binding while one is held would otherwise report two presses with no
+// matching release, and main.zig would think two recordings are live.
+var latched: ?Latched = null;
+var chord_key_down = [_]bool{ false, false, false };
+// Cancel is press-only and has no release event, so it cannot share the
+// Latched slot. Its own state re-arms on cancel-key release or on release
+// of a required modifier while the cancel key is still held.
+var cancel_key_down = false;
+var cancel_emitted = false;
+
+fn bindingForLatched(kind: Latched) shortcut.Binding {
+    return switch (kind) {
+        .shortcut => active_cfg.shortcut,
+        .clipboard => active_cfg.clipboard orelse .{ .raw_code = 0 },
+        .search => active_cfg.search orelse .{ .raw_code = 0 },
+    };
+}
+
+fn pressedEvent(kind: Latched) KeyEvent {
+    return switch (kind) {
+        .shortcut => .hotkey_pressed,
+        .clipboard => .clipboard_pressed,
+        .search => .search_pressed,
+    };
+}
+
+fn releasedEvent(kind: Latched) KeyEvent {
+    return switch (kind) {
+        .shortcut => .hotkey_released,
+        .clipboard => .clipboard_released,
+        .search => .search_released,
+    };
+}
+
+fn chordOf(b: shortcut.Binding) ?shortcut.Shortcut {
+    return switch (b) {
+        .chord => |ch| ch,
+        .raw_code => null,
+    };
+}
+
+fn chordModifiersSatisfied(ch: shortcut.Shortcut) bool {
+    const h = held.load(.acquire);
+    if (ch.modifiers.meta and (h & meta_bit) == 0) return false;
+    if (ch.modifiers.shift and (h & shift_bit) == 0) return false;
+    return true;
+}
+
+fn isModifierCode(code: u16) bool {
+    return code == KEY_LEFTMETA_C or code == KEY_RIGHTMETA_C or code == KEY_LEFTSHIFT_C or code == KEY_RIGHTSHIFT_C;
+}
+
+fn modifierBit(code: u16) ?u16 {
+    if (code == KEY_LEFTMETA_C or code == KEY_RIGHTMETA_C) return meta_bit;
+    if (code == KEY_LEFTSHIFT_C or code == KEY_RIGHTSHIFT_C) return shift_bit;
+    return null;
+}
+
+fn chordRequiresModifier(ch: shortcut.Shortcut, bit: u16) bool {
+    return (bit == meta_bit and ch.modifiers.meta) or (bit == shift_bit and ch.modifiers.shift);
+}
+
+fn latchedRequiresModifier(kind: Latched, bit: u16) bool {
+    const ch = chordOf(bindingForLatched(kind)) orelse return false;
+    return chordRequiresModifier(ch, bit);
+}
+
+fn cancelChord() ?shortcut.Shortcut {
+    return chordOf(active_cfg.cancel);
+}
+
+fn cancelChordRequiresModifier(bit: u16) bool {
+    const ch = cancelChord() orelse return false;
+    return chordRequiresModifier(ch, bit);
+}
+
+fn nativeCode(name: shortcut.KeyName) ?u16 {
+    const idx = @intFromEnum(name);
+    const a_idx = @intFromEnum(shortcut.KeyName.a);
+    const z_idx = @intFromEnum(shortcut.KeyName.z);
+    if (idx >= a_idx and idx <= z_idx) {
+        return letters[idx - a_idx];
+    }
+    const d0_idx = @intFromEnum(shortcut.KeyName.d0);
+    const d9_idx = @intFromEnum(shortcut.KeyName.d9);
+    if (idx >= d0_idx and idx <= d9_idx) {
+        const n: u16 = @intCast(idx - d0_idx);
+        if (n == 0) return 11;
+        return digit_base + n - 1;
+    }
+    const f1_idx = @intFromEnum(shortcut.KeyName.f1);
+    const f24_idx = @intFromEnum(shortcut.KeyName.f24);
+    if (idx >= f1_idx and idx <= f24_idx) {
+        return fkeys[idx - f1_idx];
+    }
+    return switch (name) {
+        .space => 57,
+        .enter => 28,
+        .tab => 15,
+        .esc => 1,
+        .backspace => 14,
+        .delete => 111,
+        .insert => 110,
+        .home => 102,
+        .end => 107,
+        .pageup => 104,
+        .pagedown => 109,
+        .left => 105,
+        .right => 106,
+        .up => 103,
+        .down => 108,
+        .minus => 12,
+        .equal => 13,
+        .comma => 51,
+        .period => 52,
+        .slash => 53,
+        .backslash => 43,
+        .semicolon => 39,
+        .quote => 40,
+        .bracketleft => 26,
+        .bracketright => 27,
+        .grave => 41,
+        else => null,
+    };
+}
 
 fn closeFd(fd: posix.fd_t) void {
     _ = std.os.linux.close(fd);
@@ -109,12 +254,23 @@ fn openPath(path: []const u8) !?posix.fd_t {
 pub fn setup(config: HotkeyConfig) !void {
     destroy();
     const log = std.log.scoped(.hotkey);
+    // A bare chord and an old numeric code can name the same key, and the
+    // listener stops at its first match, so one action would never fire.
+    // warn, not err: main.zig prints the user-facing startup error at err, and a test that provokes this path would fail on a logged err.
+    if (types.mixedKindCollision(config, nativeCode)) |pair| {
+        log.warn("hotkey.{s} and hotkey.{s} resolve to the same key; change one of them", .{ pair.a, pair.b });
+        return error.ShortcutCollision;
+    }
     // Priority 1: explicit event path (config evdev or ZHISPER_EVDEV).
     if (pickEvdevPath(config.evdev)) |path| {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("using explicit evdev {s} (key={d}, cancel={d})", .{ path, config.key_code, config.cancel_key_code });
+            var b_shortcut: [32]u8 = undefined;
+            var b_cancel: [32]u8 = undefined;
+            const key_label = config.shortcut.format(&b_shortcut) catch "?";
+            const cancel_label = config.cancel.format(&b_cancel) catch "?";
+            log.info("using explicit evdev {s} (key={s}, cancel={s})", .{ path, key_label, cancel_label });
             return;
         }
         return error.DeviceNotFound;
@@ -134,7 +290,11 @@ pub fn setup(config: HotkeyConfig) !void {
             if (try openPath(path)) |fd| {
                 fd_evdev = fd;
                 active_cfg = config;
-                log.info("name match '{s}' -> {s} (key={d}, cancel={d})", .{ want, path, config.key_code, config.cancel_key_code });
+                var b_shortcut: [32]u8 = undefined;
+                var b_cancel: [32]u8 = undefined;
+                const key_label = config.shortcut.format(&b_shortcut) catch "?";
+                const cancel_label = config.cancel.format(&b_cancel) catch "?";
+                log.info("name match '{s}' -> {s} (key={s}, cancel={s})", .{ want, path, key_label, cancel_label });
                 return;
             }
         }
@@ -153,7 +313,11 @@ pub fn setup(config: HotkeyConfig) !void {
         if (try openPath(path)) |fd| {
             fd_evdev = fd;
             active_cfg = config;
-            log.info("auto-scan picked {s} (key={d}, cancel={d})", .{ path, config.key_code, config.cancel_key_code });
+            var b_shortcut: [32]u8 = undefined;
+            var b_cancel: [32]u8 = undefined;
+            const key_label = config.shortcut.format(&b_shortcut) catch "?";
+            const cancel_label = config.cancel.format(&b_cancel) catch "?";
+            log.info("auto-scan picked {s} (key={s}, cancel={s})", .{ path, key_label, cancel_label });
             return;
         }
     }
@@ -168,44 +332,162 @@ pub fn pollEvent() ?KeyEvent {
     // https://www.kernel.org/doc/html/latest/input/input.html (section 1.5)
     var ev: c.struct_input_event = undefined;
     const bytes = std.mem.asBytes(&ev);
-    while (true) {
+    outer: while (true) {
         const n = std.os.linux.read(fd_evdev, bytes.ptr, bytes.len);
         if (n != bytes.len) return null; // EAGAIN on empty nonblocking fd
         if (ev.type != c.EV_KEY) continue;
-        // log.debug("ev code={d} value={d} (want talk={d} clipboard={d} cancel={d})", .{ ev.code, ev.value, active_cfg.key_code, active_cfg.clipboard_key_code, active_cfg.cancel_key_code });
+        // log.debug("ev code={d} value={d}", .{ ev.code, ev.value });
+
+        // 1) Modifier bookkeeping: value 1 sets, 0 clears, 2 ignored.
+        if (modifierBit(@intCast(ev.code))) |bit| {
+            if (ev.value == 1) {
+                _ = held.fetchOr(bit, .acq_rel);
+                if (cancel_key_down) {
+                    if (cancelChord()) |ch| {
+                        if (!cancel_emitted and chordModifiersSatisfied(ch)) {
+                            cancel_emitted = true;
+                            return .cancel_pressed;
+                        }
+                    }
+                }
+                if (latched == null) {
+                    const candidates = [_]Latched{ .shortcut, .clipboard, .search };
+                    for (candidates) |kind| {
+                        if (!chord_key_down[@intFromEnum(kind)]) continue;
+                        const ch = chordOf(bindingForLatched(kind)) orelse continue;
+                        if (!chordModifiersSatisfied(ch)) continue;
+                        latched = kind;
+                        return pressedEvent(kind);
+                    }
+                }
+            } else if (ev.value == 0) {
+                _ = held.fetchAnd(~bit, .acq_rel);
+                if (cancel_key_down and cancelChordRequiresModifier(bit)) {
+                    cancel_emitted = false;
+                }
+                // 2) Modifier up: release latched chord if it required this modifier.
+                if (latched) |kind| {
+                    if (latchedRequiresModifier(kind, bit)) {
+                        latched = null;
+                        return releasedEvent(kind);
+                    }
+                }
+            }
+            // Autorepeat on modifier: ignored.
+            continue;
+        }
+
+        // Cancel chord: press-only, fires even while another binding is latched.
+        if (cancelChord()) |ch| {
+            if (nativeCode(ch.key)) |key_code| {
+                if (ev.code == key_code) {
+                    if (ev.value == 1) {
+                        cancel_key_down = true;
+                        if (!cancel_emitted and chordModifiersSatisfied(ch)) {
+                            cancel_emitted = true;
+                            return .cancel_pressed;
+                        }
+                        continue :outer;
+                    }
+                    if (ev.value == 0) {
+                        cancel_key_down = false;
+                        cancel_emitted = false;
+                        continue :outer;
+                    }
+                    // autorepeat: swallow
+                    continue :outer;
+                }
+            }
+        }
+
+        // 3) Chord bindings for record / clipboard / search.
+        const candidates = [_]Latched{ .shortcut, .clipboard, .search };
+        for (candidates) |kind| {
+            const b = bindingForLatched(kind);
+            const ch = chordOf(b) orelse continue;
+            const key_code = nativeCode(ch.key) orelse continue;
+            if (ev.code != key_code) continue;
+
+            if (ev.value == 1) {
+                chord_key_down[@intFromEnum(kind)] = true;
+                if (latched != null) continue :outer; // another binding already latched
+                if (!chordModifiersSatisfied(ch)) continue :outer;
+                latched = kind;
+                return pressedEvent(kind);
+            }
+            if (ev.value == 0) {
+                chord_key_down[@intFromEnum(kind)] = false;
+                if (latched == kind) {
+                    latched = null;
+                    return releasedEvent(kind);
+                }
+                continue :outer;
+            }
+            // autorepeat: swallow
+            continue :outer;
+        }
+
+        // 5) Raw-code bindings keep today's behaviour exactly.
         // Hotkey first so a misconfigured cancel == hotkey degrades to hotkey.
-        if (ev.code == active_cfg.key_code) {
-            if (ev.value == 1) return .hotkey_pressed;
-            if (ev.value == 0) return .hotkey_released;
-            continue; // value == 2 is auto-repeat: ignore.
+        if (types.rawCode(active_cfg.shortcut)) |hk| {
+            if (ev.code == hk) {
+                if (ev.value == 1) return .hotkey_pressed;
+                if (ev.value == 0) return .hotkey_released;
+                continue; // value == 2 is auto-repeat: ignore.
+            }
         }
-        if (active_cfg.clipboard_key_code != 0 and ev.code == active_cfg.clipboard_key_code) {
-            if (ev.value == 1) return .clipboard_pressed;
-            if (ev.value == 0) return .clipboard_released;
-            continue; // value == 2 is auto-repeat: ignore.
+        if (active_cfg.clipboard) |b| {
+            if (types.rawCode(b)) |code| {
+                if (ev.code == code) {
+                    if (ev.value == 1) return .clipboard_pressed;
+                    if (ev.value == 0) return .clipboard_released;
+                    continue; // value == 2 is auto-repeat: ignore.
+                }
+            }
         }
-        if (active_cfg.cancel_key_code != 0 and ev.code == active_cfg.cancel_key_code) {
-            if (ev.value == 1) return .cancel_pressed;
-            continue; // cancel release + autorepeat swallowed.
+        if (types.rawCode(active_cfg.cancel)) |code| {
+            if (ev.code == code) {
+                if (ev.value == 1) return .cancel_pressed;
+                continue; // cancel release + autorepeat swallowed.
+            }
         }
-        if (active_cfg.search_key_code != 0 and ev.code == active_cfg.search_key_code) {
-            if (ev.value == 1) return .search_pressed;
-            if (ev.value == 0) return .search_released;
-            continue; // value == 2 is auto-repeat: ignore.
+        if (active_cfg.search) |b| {
+            if (types.rawCode(b)) |code| {
+                if (ev.code == code) {
+                    if (ev.value == 1) return .search_pressed;
+                    if (ev.value == 0) return .search_released;
+                    continue; // value == 2 is auto-repeat: ignore.
+                }
+            }
         }
     }
+}
+
+pub fn modifiersHeld() bool {
+    return (held.load(.acquire) & (meta_bit | shift_bit)) != 0;
 }
 
 pub fn destroy() void {
     if (fd_evdev < 0) return;
     closeFd(fd_evdev);
     fd_evdev = -1;
+    held.store(0, .release);
+    latched = null;
+    chord_key_down = [_]bool{ false, false, false };
+    cancel_key_down = false;
+    cancel_emitted = false;
 }
 
 fn setFdForTest(fd: posix.fd_t, config: HotkeyConfig) void {
-    if (fd_evdev >= 0) destroy();
+    // Do not close the previous fd here: tests own their pipe fds and may
+    // have already closed them, so closing a stale fd number can hit a reused fd.
     fd_evdev = fd;
     active_cfg = config;
+    held.store(0, .release);
+    latched = null;
+    chord_key_down = [_]bool{ false, false, false };
+    cancel_key_down = false;
+    cancel_emitted = false;
 }
 
 fn writeTestEvent(fd: posix.fd_t, ev_type: u16, code: u16, value: i32) !void {
@@ -241,7 +523,7 @@ test "pollEvent decodes press, skips repeat, decodes release" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 31, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 30, 2);
     try writeTestEvent(fds[1], c.EV_KEY, 30, 1);
@@ -264,7 +546,7 @@ test "pollEvent decodes cancel press, swallows cancel release and repeat" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .cancel_key_code = 46 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .mode = .hold });
     // unrelated code skipped
     try writeTestEvent(fds[1], c.EV_KEY, 31, 1);
     // cancel autorepeat swallowed
@@ -290,7 +572,7 @@ test "cancel disabled with 0 never fires" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .cancel_key_code = 0 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 0 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 46, 1);
     try std.testing.expect(pollEvent() == null);
 }
@@ -340,7 +622,7 @@ test "pollEvent decodes clipboard press and release" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 87 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .clipboard = .{ .raw_code = 87 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 87, 1);
     try std.testing.expectEqual(KeyEvent.clipboard_pressed, pollEvent().?);
     try writeTestEvent(fds[1], c.EV_KEY, 87, 0);
@@ -361,7 +643,7 @@ test "pollEvent swallows clipboard autorepeat" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 87 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .clipboard = .{ .raw_code = 87 }, .mode = .hold });
     // value 2 is auto-repeat: a held key must not re-report presses.
     try writeTestEvent(fds[1], c.EV_KEY, 87, 2);
     try std.testing.expect(pollEvent() == null);
@@ -380,7 +662,7 @@ test "a clipboard key of 0 never fires" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .clipboard_key_code = 0 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .clipboard = null, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 87, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 87, 0);
     try std.testing.expect(pollEvent() == null);
@@ -399,7 +681,7 @@ test "pollEvent decodes search press and release" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .search_key_code = 65 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .search = .{ .raw_code = 65 }, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 65, 1);
     try std.testing.expectEqual(KeyEvent.search_pressed, pollEvent().?);
     try writeTestEvent(fds[1], c.EV_KEY, 65, 2);
@@ -422,8 +704,271 @@ test "search key of 0 never fires" {
         fd_evdev = saved_fd;
         active_cfg = saved_cfg;
     }
-    setFdForTest(fds[0], .{ .key_code = 30, .mode = .hold, .search_key_code = 0 });
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 }, .search = null, .mode = .hold });
     try writeTestEvent(fds[1], c.EV_KEY, 65, 1);
     try writeTestEvent(fds[1], c.EV_KEY, 65, 0);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "nativeCode maps every portable key name to its evdev code" {
+    try std.testing.expectEqual(@as(?u16, 30), nativeCode(.a));
+    try std.testing.expectEqual(@as(?u16, 44), nativeCode(.z));
+    try std.testing.expectEqual(@as(?u16, 11), nativeCode(.d0));
+    try std.testing.expectEqual(@as(?u16, 2), nativeCode(.d1));
+    try std.testing.expectEqual(@as(?u16, 59), nativeCode(.f1));
+    try std.testing.expectEqual(@as(?u16, 68), nativeCode(.f10));
+    try std.testing.expectEqual(@as(?u16, 87), nativeCode(.f11));
+    try std.testing.expectEqual(@as(?u16, 88), nativeCode(.f12));
+    try std.testing.expectEqual(@as(?u16, 183), nativeCode(.f13));
+    try std.testing.expectEqual(@as(?u16, 194), nativeCode(.f24));
+    try std.testing.expectEqual(@as(?u16, 57), nativeCode(.space));
+    try std.testing.expectEqual(@as(?u16, 28), nativeCode(.enter));
+    try std.testing.expectEqual(@as(?u16, 1), nativeCode(.esc));
+    try std.testing.expectEqual(@as(?u16, 111), nativeCode(.delete));
+    try std.testing.expectEqual(@as(?u16, 41), nativeCode(.grave));
+}
+
+test "a meta chord fires only while meta is held" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+8") },
+        .cancel = .{ .raw_code = 46 },
+    });
+    // The key alone must stay silent: the modifier is part of the binding.
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 1);
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 0);
+    try std.testing.expect(pollEvent() == null);
+    // meta down, then the key: this is the chord.
+    try writeTestEvent(fds[1], c.EV_KEY, 125, 1);
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 1);
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    // Releasing meta alone ends the chord, without waiting for the key.
+    try writeTestEvent(fds[1], c.EV_KEY, 125, 0);
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 9, 0);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "a bare function key chord fires on the key alone" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("f9") },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    // 67 is F9: no modifier event comes first, and none is required.
+    try writeTestEvent(fds[1], c.EV_KEY, 67, 1);
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 67, 0);
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "setup refuses a bare chord and a raw code that name the same key" {
+    const sc = @import("shortcut.zig");
+    // 67 is F9 on evdev, so both bindings claim one press and the listener's
+    // first match would leave the cancel action dead.
+    const saved_fd = fd_evdev;
+    defer fd_evdev = saved_fd;
+    fd_evdev = -1; // no device open: the refusal must happen before any probe
+    try std.testing.expectError(error.ShortcutCollision, setup(.{
+        .shortcut = .{ .chord = try sc.parse("f9") },
+        .cancel = .{ .raw_code = 67 },
+    }));
+}
+
+test "a chord registers whichever key goes down first" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+f2") },
+        .cancel = .{ .raw_code = 46 },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, 60, 1); // key first
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 126, 1); // right meta second
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 60, 0); // key up first
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 126, 0);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "a meta+shift chord needs shift too, and swallows its autorepeat" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+shift+z") },
+        .cancel = .{ .raw_code = 46 },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, 125, 1);
+    try writeTestEvent(fds[1], c.EV_KEY, 44, 1); // z without shift: no chord
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 42, 1); // left shift: chord forms
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 44, 2); // key autorepeat: silent
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 42, 0); // shift up ends it
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+}
+
+test "modifiersHeld tracks meta and shift and ignores repeats" {
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{ .shortcut = .{ .raw_code = 30 }, .cancel = .{ .raw_code = 46 } });
+    try std.testing.expect(!modifiersHeld());
+    try writeTestEvent(fds[1], c.EV_KEY, 54, 1); // right shift
+    _ = pollEvent();
+    try std.testing.expect(modifiersHeld());
+    try writeTestEvent(fds[1], c.EV_KEY, 54, 2); // autorepeat must not double count
+    _ = pollEvent();
+    try writeTestEvent(fds[1], c.EV_KEY, 54, 0);
+    _ = pollEvent();
+    try std.testing.expect(!modifiersHeld());
+}
+
+test "a chord cancel fires after meta then key" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .raw_code = 30 },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1);
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1); // F8
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+}
+
+test "a chord cancel fires after key then meta" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .raw_code = 30 },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1); // F8 first
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1); // meta second
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+}
+
+test "a chord cancel does not re-fire on autorepeat, and fires again after release and re-press" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .raw_code = 30 },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1);
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1);
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 2); // autorepeat
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 0); // release
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1); // re-press
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+}
+
+test "a chord cancel fires while a record chord is latched" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+9") },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1);
+    _ = pollEvent();
+    try writeTestEvent(fds[1], c.EV_KEY, 10, 1); // KEY_9
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1); // F8 cancels while record is latched
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+}
+
+test "a chord cancel re-arms when a required modifier is released while key is held" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .raw_code = 30 },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1);
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1);
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 0); // re-arm
+    try std.testing.expect(pollEvent() == null);
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1);
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
+}
+
+test "a chord cancel preempts another chord ready on the same modifier press" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("meta+9") },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    try writeTestEvent(fds[1], c.EV_KEY, 10, 1); // KEY_9 down
+    try writeTestEvent(fds[1], c.EV_KEY, 66, 1); // F8 down
+    try writeTestEvent(fds[1], c.EV_KEY, KEY_LEFTMETA_C, 1); // meta makes both ready
+    try std.testing.expectEqual(KeyEvent.cancel_pressed, pollEvent().?);
     try std.testing.expect(pollEvent() == null);
 }
