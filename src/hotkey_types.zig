@@ -55,6 +55,38 @@ pub fn actions(cfg: HotkeyConfig) [4]Action {
     };
 }
 
+/// The two actions that fire on the same physical key press, or null.
+///
+/// WHY: a chord and a raw code are different shapes, so comparing bindings
+/// never reports them equal even when they name one key. Harmless while every
+/// chord required meta; a chord with no modifier fires on the same bare press a
+/// raw code does, and the listener stops at its first match, leaving the other
+/// action silently dead.
+///
+/// `codeFor` is the OS key table: portable name to native code, null when this
+/// OS cannot report that key.
+pub fn mixedKindCollision(cfg: HotkeyConfig, codeFor: *const fn (shortcut.KeyName) ?u16) ?Collision {
+    const all = actions(cfg);
+    for (all, 0..) |a, i| {
+        const code_a = bareCode(a.binding, codeFor) orelse continue;
+        for (all[i + 1 ..]) |b| {
+            const code_b = bareCode(b.binding, codeFor) orelse continue;
+            if (code_a == code_b) return .{ .a = a.name, .b = b.name };
+        }
+    }
+    return null;
+}
+
+/// The native code a modifier-free press of this binding reports, or null when
+/// it cannot fire bare: it needs a modifier, or it is disabled or unbound.
+fn bareCode(binding: ?shortcut.Binding, codeFor: *const fn (shortcut.KeyName) ?u16) ?u16 {
+    const b = binding orelse return null;
+    switch (b) {
+        .raw_code => return rawCode(b),
+        .chord => |ch| return if (ch.modifiers.meta or ch.modifiers.shift) null else codeFor(ch.key),
+    }
+}
+
 /// Fixed-capacity single-producer / single-consumer queue of hotkey events.
 ///
 /// WHY this exists: main.zig calls pollEvent() exactly once per loop iteration
@@ -150,6 +182,55 @@ test "actions names the four bindings in config order" {
     try std.testing.expect(list[1].binding.?.eql(.{ .raw_code = 66 }));
     // An action that is switched off has no binding to claim a key.
     try std.testing.expect(list[3].binding == null);
+}
+
+// A stand-in for an OS key table: two function keys with codes, everything else
+// unmappable. The helper is judged on the codes it is given, not on a real
+// platform, so this runs on every target.
+fn codeForTwoFunctionKeys(name: shortcut.KeyName) ?u16 {
+    return switch (name) {
+        .f9 => 67,
+        .f8 => 66,
+        else => null,
+    };
+}
+
+test "a bare chord and a raw code naming the same key collide" {
+    const t = @import("hotkey_types.zig");
+    const sc = @import("shortcut.zig");
+    const cfg: t.HotkeyConfig = .{
+        .shortcut = .{ .chord = try sc.parse("f9") },
+        .cancel = .{ .raw_code = 67 },
+    };
+    const pair = t.mixedKindCollision(cfg, codeForTwoFunctionKeys).?;
+    try std.testing.expectEqualStrings("shortcut", pair.a);
+    try std.testing.expectEqualStrings("cancel", pair.b);
+}
+
+test "nothing collides without one bare chord and one matching raw code" {
+    const t = @import("hotkey_types.zig");
+    const sc = @import("shortcut.zig");
+    const bare_f9 = sc.Binding{ .chord = try sc.parse("f9") };
+    // A chord that needs meta can never fire on the same bare press.
+    try std.testing.expect(t.mixedKindCollision(.{
+        .shortcut = .{ .chord = try sc.parse("meta+f9") },
+        .cancel = .{ .raw_code = 67 },
+    }, codeForTwoFunctionKeys) == null);
+    // Same shape, different native code.
+    try std.testing.expect(t.mixedKindCollision(.{
+        .shortcut = bare_f9,
+        .cancel = .{ .raw_code = 66 },
+    }, codeForTwoFunctionKeys) == null);
+    // 0 is the "never fires" placeholder, not a key press.
+    try std.testing.expect(t.mixedKindCollision(.{
+        .shortcut = bare_f9,
+        .cancel = .{ .raw_code = 0 },
+    }, codeForTwoFunctionKeys) == null);
+    // f10 has no code in this fake table, so nothing can be claimed twice.
+    try std.testing.expect(t.mixedKindCollision(.{
+        .shortcut = .{ .chord = try sc.parse("f10") },
+        .cancel = .{ .raw_code = 67 },
+    }, codeForTwoFunctionKeys) == null);
 }
 
 test "EventRing preserves push order" {
