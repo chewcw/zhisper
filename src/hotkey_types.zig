@@ -30,6 +30,31 @@ pub fn rawCode(b: shortcut.Binding) ?u16 {
     };
 }
 
+/// One config action and the binding resolved for it. `name` is the config
+/// field, so a startup error can name the line the user has to edit.
+pub const Action = struct {
+    name: []const u8,
+    binding: ?shortcut.Binding,
+};
+
+/// Two actions that fight over one key press, named as they appear in the
+/// config.
+pub const Collision = struct {
+    a: []const u8,
+    b: []const u8,
+};
+
+/// The four bindings a listener serves. Record and cancel are always bound;
+/// clipboard and search carry null when they are switched off.
+pub fn actions(cfg: HotkeyConfig) [4]Action {
+    return .{
+        .{ .name = "shortcut", .binding = cfg.shortcut },
+        .{ .name = "cancel", .binding = cfg.cancel },
+        .{ .name = "clipboard", .binding = cfg.clipboard },
+        .{ .name = "search", .binding = cfg.search },
+    };
+}
+
 /// Fixed-capacity single-producer / single-consumer queue of hotkey events.
 ///
 /// WHY this exists: main.zig calls pollEvent() exactly once per loop iteration
@@ -105,6 +130,26 @@ test "rawCode reads legacy codes and refuses chords" {
     // 0 is the "never fires" placeholder used by an unset module-level config.
     try std.testing.expect(t.rawCode(.{ .raw_code = 0 }) == null);
     try std.testing.expect(t.rawCode(.{ .chord = try sc.parse("meta+8") }) == null);
+}
+
+test "actions names the four bindings in config order" {
+    const t = @import("hotkey_types.zig");
+    const sc = @import("shortcut.zig");
+    const f9 = sc.Binding{ .chord = try sc.parse("f9") };
+    const list = t.actions(.{
+        .shortcut = f9,
+        .cancel = .{ .raw_code = 66 },
+        .clipboard = .{ .raw_code = 68 },
+        .search = null,
+    });
+    try std.testing.expectEqualStrings("shortcut", list[0].name);
+    try std.testing.expectEqualStrings("cancel", list[1].name);
+    try std.testing.expectEqualStrings("clipboard", list[2].name);
+    try std.testing.expectEqualStrings("search", list[3].name);
+    try std.testing.expect(list[0].binding.?.eql(f9));
+    try std.testing.expect(list[1].binding.?.eql(.{ .raw_code = 66 }));
+    // An action that is switched off has no binding to claim a key.
+    try std.testing.expect(list[3].binding == null);
 }
 
 test "EventRing preserves push order" {
