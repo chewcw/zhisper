@@ -220,6 +220,10 @@ pub const CliOverrides = struct {
     base_url: ?[]const u8 = null,
     prompt: ?[]const u8 = null,
     language: ?[]const u8 = null,
+    shortcut: ?[]const u8 = null,
+    cancel: ?[]const u8 = null,
+    clipboard: ?[]const u8 = null,
+    search: ?[]const u8 = null,
     key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
@@ -350,12 +354,17 @@ pub const EnvValues = struct {
     prompt: ?[]const u8 = null,
     language: ?[]const u8 = null,
     keyterm: ?[]const u8 = null,
+    shortcut: ?[]const u8 = null,
+    cancel: ?[]const u8 = null,
+    clipboard: ?[]const u8 = null,
+    search: ?[]const u8 = null,
     key_code: ?i16 = null,
     mode: ?[]const u8 = null,
     evdev: ?[]const u8 = null,
     evdev_name: ?[]const u8 = null,
     cancel_key_code: ?i16 = null,
     clipboard_key_code: ?i16 = null,
+    search_key_code: ?i16 = null,
     device: ?[]const u8 = null,
     min_duration_ms: ?u32 = null,
     wav_path: ?[]const u8 = null,
@@ -371,12 +380,29 @@ pub fn applyEnv(cfg: Config, env: EnvValues) Config {
     if (env.prompt) |v| out.transcribe.prompt = v;
     if (env.language) |v| out.transcribe.language = v;
     if (env.keyterm) |v| out.transcribe.keyterm = v;
-    if (env.key_code) |v| out.hotkey.key_code = v;
+    if (env.shortcut) |v| out.hotkey.shortcut = v;
+    if (env.cancel) |v| out.hotkey.cancel = v;
+    if (env.clipboard) |v| out.hotkey.clipboard = v;
+    if (env.search) |v| out.hotkey.search = v;
+    if (env.key_code) |v| {
+        out.hotkey.key_code = v;
+        if (env.shortcut == null) out.hotkey.shortcut = "";
+    }
     if (env.mode) |v| out.hotkey.mode = v;
     if (env.evdev) |v| out.hotkey.evdev = v;
     if (env.evdev_name) |v| out.hotkey.evdev_name = v;
-    if (env.cancel_key_code) |v| out.hotkey.cancel_key_code = v;
-    if (env.clipboard_key_code) |v| out.hotkey.clipboard_key_code = v;
+    if (env.cancel_key_code) |v| {
+        out.hotkey.cancel_key_code = v;
+        if (env.cancel == null) out.hotkey.cancel = "";
+    }
+    if (env.clipboard_key_code) |v| {
+        out.hotkey.clipboard_key_code = v;
+        if (env.clipboard == null) out.hotkey.clipboard = "";
+    }
+    if (env.search_key_code) |v| {
+        out.hotkey.search_key_code = v;
+        if (env.search == null) out.hotkey.search = "";
+    }
     if (env.device) |v| out.audio.device = v;
     if (env.min_duration_ms) |v| out.daemon.min_duration_ms = v;
     if (env.wav_path) |v| out.daemon.wav_path = v;
@@ -392,6 +418,10 @@ pub fn applyCli(cfg: Config, cli: CliOverrides) Config {
         .base_url = cli.base_url,
         .prompt = cli.prompt,
         .language = cli.language,
+        .shortcut = cli.shortcut,
+        .cancel = cli.cancel,
+        .clipboard = cli.clipboard,
+        .search = cli.search,
         .key_code = cli.key_code,
         .mode = cli.mode,
         .evdev = cli.evdev,
@@ -496,12 +526,17 @@ pub fn readEnvValues() EnvValues {
         .prompt = envStr("ZHISPER_PROMPT"),
         .language = envStr("ZHISPER_LANGUAGE"),
         .keyterm = envStr("ZHISPER_KEYTERM"),
+        .shortcut = envStr("ZHISPER_HOTKEY"),
+        .cancel = envStr("ZHISPER_CANCEL"),
+        .clipboard = envStr("ZHISPER_CLIPBOARD"),
+        .search = envStr("ZHISPER_SEARCH"),
         .key_code = envI16("ZHISPER_KEY_CODE"),
         .mode = envStr("ZHISPER_MODE"),
         .evdev = envStr("ZHISPER_EVDEV"),
         .evdev_name = envStr("ZHISPER_EVDEV_NAME"),
         .cancel_key_code = envI16("ZHISPER_CANCEL_KEY_CODE"),
         .clipboard_key_code = envI16("ZHISPER_CLIPBOARD_KEY_CODE"),
+        .search_key_code = envI16("ZHISPER_SEARCH_KEY_CODE"),
         .device = envStr("ZHISPER_DEVICE"),
         .min_duration_ms = envU32("ZHISPER_MIN_DURATION_MS"),
         .wav_path = envStr("ZHISPER_WAV_PATH"),
@@ -1237,4 +1272,19 @@ test "shortcut string wins over legacy key_code in parsed file" {
     defer freeConfig(gpa, cfg);
     const hk = try resolveHotkeys(cfg.hotkey);
     try std.testing.expect(hk.shortcut.eql(.{ .chord = try shortcut.parse("meta+8") }));
+}
+
+test "a shortcut env var overrides the file string" {
+    const cfg = applyEnv(defaultConfig(), .{ .shortcut = "meta+8" });
+    try std.testing.expectEqualStrings("meta+8", cfg.hotkey.shortcut);
+}
+
+test "a legacy env code clears the string so the explicit flag wins" {
+    // Without the clear, the parsed file string would keep winning over the
+    // higher-precedence integer and the user's --key-code would do nothing.
+    var cfg = defaultConfig();
+    cfg.hotkey.shortcut = "meta+8";
+    const out = applyEnv(cfg, .{ .key_code = 67 });
+    try std.testing.expectEqualStrings("", out.hotkey.shortcut);
+    try std.testing.expectEqual(@as(?i16, 67), out.hotkey.key_code);
 }
