@@ -366,6 +366,13 @@ fn hookThread() void {
 }
 
 pub fn setup(config: types.HotkeyConfig) !void {
+    // A bare chord and an old numeric code can name the same key, and the
+    // listener stops at its first match, so one action would never fire.
+    // warn, not err: main.zig prints the user-facing startup error at err, and a test that provokes this path would fail on a logged err.
+    if (types.mixedKindCollision(config, nativeCode)) |pair| {
+        std.log.scoped(.hotkey).warn("hotkey.{s} and hotkey.{s} resolve to the same key; change one of them", .{ pair.a, pair.b });
+        return error.ShortcutCollision;
+    }
     cfg = config;
     ring = types.EventRing.init();
     hotkey_down = false;
