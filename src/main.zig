@@ -74,10 +74,7 @@ fn hotkeyStartupFailure(err: anyerror, hotkey: zhisper.config.HotkeyCfg) noretur
                     "hotkey.{s} is not a valid shortcut ({s})",
                     .{ problem.field, @errorName(problem.err) },
                 );
-                std.log.err(
-                    "meta is required; supported modifiers are meta and shift, for example \"meta+f9\"",
-                    .{},
-                );
+                std.log.err("{s}", .{shortcutHint()});
             } else {
                 std.log.err("hotkey shortcut is invalid ({s})", .{@errorName(err)});
             }
@@ -89,12 +86,21 @@ fn hotkeyStartupFailure(err: anyerror, hotkey: zhisper.config.HotkeyCfg) noretur
                     .{ pair.a, pair.b },
                 );
             } else {
+                std.log.err("a bare function key and an old numeric key code may name the same key; give both actions shortcut strings", .{});
                 std.log.err("hotkey bindings collide ({s})", .{@errorName(err)});
             }
         },
         else => std.log.err("hotkey setup failed: {s}", .{@errorName(err)}),
     }
     std.process.exit(1);
+}
+
+/// Printed when a shortcut string fails to parse. The parser's error name alone
+/// ("MissingMetaModifier") does not tell the user that a function key may stand
+/// alone, so the accepted shapes are spelled out here.
+fn shortcutHint() []const u8 {
+    return "a shortcut is a bare function key (f1-f24), or meta+key with optional shift, " ++
+        "for example \"f9\" or \"meta+f9\"";
 }
 
 fn waitForModifiersReleased(io: std.Io, held: *const fn () bool, budget_ms: u64, step_ms: u64) bool {
@@ -821,7 +827,7 @@ pub fn main(init: std.process.Init) !void {
     var hotkeys = zhisper.config.resolveHotkeys(cfg.hotkey) catch |err| hotkeyStartupFailure(err, cfg.hotkey);
 
     const legacy = legacyHotkeyKeysInUse(cfg.hotkey);
-    if (legacy[0]) daemon_log.warn("hotkey.key_code is deprecated, use hotkey.shortcut = \"meta+f9\"", .{});
+    if (legacy[0]) daemon_log.warn("hotkey.key_code is deprecated, use hotkey.shortcut = \"f9\"", .{});
     if (legacy[1]) daemon_log.warn("hotkey.cancel_key_code is deprecated, use hotkey.cancel = \"meta+f8\"", .{});
     if (legacy[2]) daemon_log.warn("hotkey.clipboard_key_code is deprecated, use hotkey.clipboard = \"meta+f10\"", .{});
     if (legacy[3]) daemon_log.warn("hotkey.search_key_code is deprecated, use hotkey.search = \"off\"", .{});
@@ -846,6 +852,9 @@ pub fn main(init: std.process.Init) !void {
         .evdev = cfg.hotkey.evdev,
         .evdev_name = cfg.hotkey.evdev_name,
     }) catch |err| {
+        if (err == error.ShortcutCollision or err == error.InvalidShortcut) {
+            hotkeyStartupFailure(err, cfg.hotkey);
+        }
         std.log.err("hotkey setup failed: {s}", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -1558,4 +1567,13 @@ test "the wait returns at once when nothing is held" {
     HeldProbe.release_after = 0;
     try std.testing.expect(waitForModifiersReleased(std.testing.io, &HeldProbe.held, 1000, 5));
     try std.testing.expectEqual(@as(usize, 1), HeldProbe.calls);
+}
+
+test "the shortcut hint names a bare function key and a meta chord" {
+    const hint = shortcutHint();
+    try std.testing.expect(std.mem.indexOf(u8, hint, "f1-f24") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "\"f9\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hint, "\"meta+f9\"") != null);
+    // The old wording said meta was required, which a bare f9 now contradicts.
+    try std.testing.expect(std.mem.indexOf(u8, hint, "meta is required") == null);
 }
