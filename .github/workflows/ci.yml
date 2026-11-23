@@ -41,6 +41,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libx11-dev libxext-dev libasound2-dev libudev-dev libevdev-dev
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            .zig-cache
+            zig-pkg
+          key: zig-pkgs-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: |
+            zig-pkgs-${{ runner.os }}-
+      - name: Fetch dependencies (with retry)
+        run: |
+          for i in 1 2 3 4 5; do
+            zig build --fetch && break
+            echo "fetch attempt $i failed, retrying in 15s..."
+            sleep 15
+            if [ "$i" -eq 5 ]; then exit 1; fi
+          done
       - name: Build
         run: zig build
       - name: Run tests
