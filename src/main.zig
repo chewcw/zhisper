@@ -97,6 +97,18 @@ fn hotkeyStartupFailure(err: anyerror, hotkey: zhisper.config.HotkeyCfg) noretur
     std.process.exit(1);
 }
 
+fn waitForModifiersReleased(io: std.Io, held: *const fn () bool, budget_ms: u64, step_ms: u64) bool {
+    if (!held()) return true;
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    const budget_ns: i96 = @as(i96, @intCast(budget_ms)) * std.time.ns_per_ms;
+    while (true) {
+        io.sleep(.fromMilliseconds(@intCast(step_ms)), .awake) catch {};
+        if (!held()) return true;
+        const elapsed = start.durationTo(std.Io.Clock.Timestamp.now(io, .awake));
+        if (elapsed.raw.nanoseconds >= budget_ns) return false;
+    }
+}
+
 /// 16kHz mono s16 = 32000 bytes/sec = 32 bytes/ms of payload (header excluded).
 fn minWavPayloadBytes(min_duration_ms: u32) usize {
     return @as(usize, min_duration_ms) * 32;
@@ -645,6 +657,12 @@ fn workerMain(
             }
         }
         const inject_log = std.log.scoped(.inject);
+        // WHY: a held meta or shift turns the injected transcript into shell
+        // shortcuts or uppercase text. Waiting is cheap; a corrupted sentence is not.
+        // When the user keeps holding the chord, give up rather than drop the text.
+        if (!waitForModifiersReleased(io, &zhisper.hotkey.modifiersHeld, 1500, 10)) {
+            inject_log.debug("chord still held after 1500 ms, typing anyway", .{});
+        }
         switch (sink) {
             .typing => {
                 const n = zhisper.inject.typeText(final_text, io) catch |err| {
@@ -1510,4 +1528,34 @@ test "clipboard capture is gated on the binding, not on a code" {
     try std.testing.expect(!clipboardBound(hotkeys));
     hotkeys.clipboard = .{ .raw_code = 87 };
     try std.testing.expect(clipboardBound(hotkeys));
+}
+
+const HeldProbe = struct {
+    var calls: usize = 0;
+    var release_after: usize = 0;
+
+    fn held() bool {
+        calls += 1;
+        return calls <= release_after;
+    }
+};
+
+test "the wait returns as soon as the modifiers are up" {
+    HeldProbe.calls = 0;
+    HeldProbe.release_after = 2;
+    try std.testing.expect(waitForModifiersReleased(std.testing.io, &HeldProbe.held, 1000, 1));
+    try std.testing.expectEqual(@as(usize, 3), HeldProbe.calls);
+}
+
+test "the wait returns false when the budget runs out" {
+    HeldProbe.calls = 0;
+    HeldProbe.release_after = std.math.maxInt(usize);
+    try std.testing.expect(!waitForModifiersReleased(std.testing.io, &HeldProbe.held, 20, 5));
+}
+
+test "the wait returns at once when nothing is held" {
+    HeldProbe.calls = 0;
+    HeldProbe.release_after = 0;
+    try std.testing.expect(waitForModifiersReleased(std.testing.io, &HeldProbe.held, 1000, 5));
+    try std.testing.expectEqual(@as(usize, 1), HeldProbe.calls);
 }
