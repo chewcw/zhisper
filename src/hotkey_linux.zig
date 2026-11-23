@@ -254,6 +254,13 @@ fn openPath(path: []const u8) !?posix.fd_t {
 pub fn setup(config: HotkeyConfig) !void {
     destroy();
     const log = std.log.scoped(.hotkey);
+    // A bare chord and an old numeric code can name the same key, and the
+    // listener stops at its first match, so one action would never fire.
+    // warn, not err: main.zig prints the user-facing startup error at err, and a test that provokes this path would fail on a logged err.
+    if (types.mixedKindCollision(config, nativeCode)) |pair| {
+        log.warn("hotkey.{s} and hotkey.{s} resolve to the same key; change one of them", .{ pair.a, pair.b });
+        return error.ShortcutCollision;
+    }
     // Priority 1: explicit event path (config evdev or ZHISPER_EVDEV).
     if (pickEvdevPath(config.evdev)) |path| {
         if (try openPath(path)) |fd| {
@@ -748,6 +755,39 @@ test "a meta chord fires only while meta is held" {
     try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
     try writeTestEvent(fds[1], c.EV_KEY, 9, 0);
     try std.testing.expect(pollEvent() == null);
+}
+
+test "a bare function key chord fires on the key alone" {
+    const sc = @import("shortcut.zig");
+    var fds: [2]posix.fd_t = undefined;
+    if (std.os.linux.pipe2(&fds, .{ .NONBLOCK = true }) != 0) return error.PipeFailed;
+    defer {
+        closeFd(fds[0]);
+        closeFd(fds[1]);
+    }
+    setFdForTest(fds[0], .{
+        .shortcut = .{ .chord = try sc.parse("f9") },
+        .cancel = .{ .chord = try sc.parse("meta+f8") },
+    });
+    // 67 is F9: no modifier event comes first, and none is required.
+    try writeTestEvent(fds[1], c.EV_KEY, 67, 1);
+    try std.testing.expectEqual(KeyEvent.hotkey_pressed, pollEvent().?);
+    try writeTestEvent(fds[1], c.EV_KEY, 67, 0);
+    try std.testing.expectEqual(KeyEvent.hotkey_released, pollEvent().?);
+    try std.testing.expect(pollEvent() == null);
+}
+
+test "setup refuses a bare chord and a raw code that name the same key" {
+    const sc = @import("shortcut.zig");
+    // 67 is F9 on evdev, so both bindings claim one press and the listener's
+    // first match would leave the cancel action dead.
+    const saved_fd = fd_evdev;
+    defer fd_evdev = saved_fd;
+    fd_evdev = -1; // no device open: the refusal must happen before any probe
+    try std.testing.expectError(error.ShortcutCollision, setup(.{
+        .shortcut = .{ .chord = try sc.parse("f9") },
+        .cancel = .{ .raw_code = 67 },
+    }));
 }
 
 test "a chord registers whichever key goes down first" {
